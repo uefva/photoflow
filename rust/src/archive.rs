@@ -94,6 +94,17 @@ fn build_plan(root: &Path, batch: &str) -> Result<ArchivePlan, String> {
     let jpg_dir = batch_dir(&d.jpg, batch)?;
     let arc_dir = batch_dir(&d.arc, batch)?;
 
+    // 兜底：即便配置校验被绕过（目录被符号链接 / junction 别名到一处），也绝不能让
+    // 「归档」退化成「把原图当重复份删掉」。
+    if naming::same_path(&jpg_dir, &arc_dir) {
+        return Err(format!(
+            "归档目录和原图目录指向同一个位置：{}\n\
+             这样归档会把原图当成「归档里已有的重复份」删掉。\n\
+             请把这两个目录改成两个不同的目录再运行。",
+            jpg_dir.display()
+        ));
+    }
+
     if !ed_dir.is_dir() {
         return Err(format!(
             "找不到成品目录：{}\n（这个批次还没有修好的照片。先在 Lightroom 里导出，\

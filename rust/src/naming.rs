@@ -82,6 +82,17 @@ fn join_rel(root: &Path, rel: &str) -> PathBuf {
     p
 }
 
+/// 两个路径是不是同一个位置。
+///
+/// 先各自 canonicalize（会解析符号链接 / junction、统一大小写和分隔符）；
+/// 任一侧不存在时退回字面比较——只是兜底，不该在这条路上报错。
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 /// 确认根目录可用：连 RAW 目录都没有，说明盘没挂上或者路径填错了。
 /// 这一步的提示语要具体，因为这是最常见的失败原因。
 pub fn check_root(root: &Path) -> Result<Dirs, String> {

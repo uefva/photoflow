@@ -8,7 +8,7 @@
 //! 复用现有的 `@@PROGRESS@@` / `@@PLAN@@` 协议，比把八个模块全改成「接受一个输出
 //! 接收器」改动小得多，也保住了「同一套代码、两个入口」这条性质。
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -73,9 +73,9 @@ pub fn save_settings(
             return Err(format!("{}：{err}", naming::area_name(key)));
         }
     }
-    let distinct: HashSet<String> = dirs.values().map(|v| v.trim().to_lowercase()).collect();
-    if distinct.len() != dirs.len() {
-        return Err("四个目录不能重名，否则文件会互相覆盖。".into());
+    // 四个目录必须互不相同：归档就是「原图目录 → 归档目录」，两者撞在一起会把原图删掉。
+    if let Some(msg) = config::dirs_conflict_in(&dirs) {
+        return Err(msg);
     }
 
     config::set_dirs(dirs.into_iter().map(|(k, v)| (k, v.trim().to_string())).collect());

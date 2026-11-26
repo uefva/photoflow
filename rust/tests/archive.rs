@@ -307,3 +307,42 @@ fn ingest_leaves_no_temp_file() {
         .collect();
     assert!(leftovers.is_empty(), "不应留下临时文件：{leftovers:?}");
 }
+
+// ---------------------------------------------------------------- 配置安全
+
+#[test]
+fn archive_refuses_when_original_and_archive_dirs_are_the_same() {
+    // 配置里 jpg 和 arc 指向同一个目录：归档会把原图当「已归档的重复份」删掉。
+    // 必须在动手之前就拒绝，原图一个都不能少。
+    let lib = Lib::new("same-dir");
+    fs::write(
+        &lib.config,
+        r#"{"dirs":{"jpg":"05_JPG图","arc":"05_JPG图"}}"#,
+    )
+    .unwrap();
+    let orig = lib.write(DIR_JPG, "DSC0001.JPG", b"ORIGINAL-JPEG");
+    lib.write(DIR_ED, "DSC0001-ed.jpg", b"EDITED");
+
+    let (code, out) = lib.run(&["archive", lib.batch(), "--apply"]);
+    assert_eq!(code, 2, "目录撞在一起时必须拒绝执行：{out}");
+    assert!(out.contains("同一个位置"), "{out}");
+    assert!(orig.exists(), "原图不能被删掉：{out}");
+}
+
+#[test]
+fn ingest_also_refuses_duplicate_dirs() {
+    // 会写文件的命令都走同一道检查，不是只堵 archive
+    let lib = Lib::new("dup-ingest");
+    fs::write(
+        &lib.config,
+        r#"{"dirs":{"raw":"05_JPG图","jpg":"05_JPG图"}}"#,
+    )
+    .unwrap();
+    let card = lib.root.join("card");
+    fs::create_dir_all(&card).unwrap();
+    fs::write(card.join("IMG_0001.JPG"), vec![b'A'; 10]).unwrap();
+
+    let (code, out) = lib.run(&["ingest", card.to_str().unwrap(), lib.batch(), "--apply"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("同一个位置"), "{out}");
+}

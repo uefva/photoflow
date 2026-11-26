@@ -138,6 +138,41 @@ def check_dir_setting(value):
     return None
 
 
+def _norm_dir(v):
+    """目录名归一化：去空白、分隔符统一、去掉结尾斜杠、转小写。"""
+    return v.strip().replace("\\", "/").rstrip("/").lower()
+
+
+def dirs_conflict(dirs=None):
+    """
+    四个目录里有没有两个指向同一个位置。
+
+    必须拦住：archive 的工作方式就是「从原图目录搬进归档目录」，两者若是同一个
+    目录，原图会被当成「归档里已经有一份的重复份」直接删掉——静默丢失原始素材。
+    界面的保存按钮本来就有这道检查，但命令行是直接读配置文件的，得在这里兜住。
+    """
+    dirs = _CONFIG["dirs"] if dirs is None else dirs
+    seen = {}
+    for key in DEFAULT_DIRS:
+        name = dirs[key]
+        norm = _norm_dir(name)
+        if norm in seen:
+            return (f"四个目录不能指向同一个位置：{AREA_NAME[seen[norm]]} 和 "
+                    f"{AREA_NAME[key]} 都是「{name.strip()}」。\n"
+                    f"这样归档会把原图目录当成归档目录，把原图自己当重复份删掉。\n"
+                    f"改 {CONFIG_PATH}（或界面「设置」页）把这两个目录分开，再重新运行。")
+        seen[norm] = key
+    return None
+
+
+def _same_dir(a, b):
+    """两个路径是不是同一个目录。能解析符号链接/junction 就解析，失败退回字面比较。"""
+    try:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except OSError:
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
 def load_config(path=None):
     """读配置文件。读不到、或某一项不合法，就退回默认值，不报错。"""
     cfg = Path(path) if path else CONFIG_PATH
@@ -723,6 +758,13 @@ def cmd_archive(args):
     ed_dir = batch_dir(p["ed"], name)
     jpg_dir = batch_dir(p["jpg"], name)
     arc_dir = batch_dir(p["arc"], name)
+
+    # 兜底：即便配置校验被绕过（目录被符号链接 / junction 别名到一处），也绝不能
+    # 让「归档」退化成「把原图当重复份删掉」。
+    if _same_dir(arc_dir, jpg_dir):
+        die(f"归档目录和原图目录指向同一个位置：{jpg_dir}\n"
+            f"这样归档会把原图当成「归档里已有的重复份」删掉。\n"
+            f"请把这两个目录改成两个不同的目录再运行。")
 
     if not ed_dir.is_dir():
         die(f"找不到成品目录：{ed_dir}\n"
@@ -1601,9 +1643,10 @@ def _run_gui(tk, ttk, filedialog, messagebox, initial_root):
                     return
                 new[key] = os.path.normpath(val)
 
-            if len({v.lower() for v in new.values()}) != len(new):
+            bad = dirs_conflict(new)
+            if bad:
                 self.settings_hint.configure(
-                    text="四个目录不能重名，否则文件会互相覆盖。", foreground=PALETTE["err"])
+                    text=bad.splitlines()[0], foreground=PALETTE["err"])
                 return
 
             _CONFIG["dirs"].update(new)
@@ -1998,6 +2041,12 @@ def main():
     load_config()
     ap = build_parser()
     args = ap.parse_args()
+    # 配置层面的硬约束：四个目录必须互不相同。会写文件的三个命令一律拒绝执行；
+    # 界面（不带子命令）和 doctor 不拦——界面要能打开才能改设置，doctor 是只读的。
+    if getattr(args, "cmd", None) in ("new", "ingest", "archive"):
+        bad = dirs_conflict()
+        if bad:
+            die(bad)
     if not getattr(args, "root", None):
         args.root = _CONFIG["root"] or DEFAULT_ROOT
     if not getattr(args, "cmd", None):

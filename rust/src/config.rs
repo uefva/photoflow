@@ -11,7 +11,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use crate::naming::{DEFAULT_ARC, DEFAULT_ED, DEFAULT_JPG, DEFAULT_RAW};
+use crate::naming::{area_name, AREA_KEYS, DEFAULT_ARC, DEFAULT_ED, DEFAULT_JPG, DEFAULT_RAW};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -128,6 +128,47 @@ fn is_absolute(v: &str) -> bool {
     }
     let b = v.as_bytes();
     b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+/// 目录名归一化后再比较：去空白、分隔符统一成 `/`、去掉结尾斜杠、转小写。
+/// Windows 上 `05_JPG图` 和 `05_JPG图/`、`a\b` 和 `a/b` 是同一个目录。
+fn norm_dir(v: &str) -> String {
+    v.trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase()
+}
+
+/// 四个目录里有没有两个指向同一个位置。
+///
+/// 必须拦住：`archive` 的工作方式就是「从原图目录搬进归档目录」，两者若是同一个
+/// 目录，原图会被当成「归档里已经有一份的重复份」直接删掉——静默丢失原始素材。
+/// 界面的保存按钮本来就有这道检查，但命令行是直接读配置文件的，得在这里兜住。
+pub fn dirs_conflict_in(dirs: &BTreeMap<String, String>) -> Option<String> {
+    let defaults = Config::default().dirs;
+    let mut seen: BTreeMap<String, &'static str> = BTreeMap::new();
+    for key in AREA_KEYS {
+        let raw = dirs.get(key).cloned().unwrap_or_else(|| defaults[key].clone());
+        let norm = norm_dir(&raw);
+        if let Some(prev) = seen.get(&norm) {
+            return Some(format!(
+                "四个目录不能指向同一个位置：{} 和 {} 都是「{}」。\n\
+                 这样归档会把原图目录当成归档目录，把原图自己当重复份删掉。\n\
+                 改 {}（或界面「设置」页）把这两个目录分开，再重新运行。",
+                area_name(prev),
+                area_name(key),
+                raw.trim(),
+                config_path().display()
+            ));
+        }
+        seen.insert(norm, key);
+    }
+    None
+}
+
+/// 用当前生效的配置做上面那项检查。
+pub fn dirs_conflict() -> Option<String> {
+    with(|c| dirs_conflict_in(&c.dirs))
 }
 
 /// 读配置文件。读不到、或某一项不合法，就保留当前值（进程启动时即默认值）。
@@ -383,6 +424,29 @@ mod tests {
         assert!(check_dir_setting("a*b").unwrap().contains("不能用于文件名"));
         // 冒号不在盘符位置也会被拒（提示语说的是盘符，略不贴切，但拒绝是对的）
         assert!(check_dir_setting("a:b").is_some());
+    }
+
+    #[test]
+    fn dirs_must_be_distinct() {
+        // 默认配置本身合法
+        assert!(dirs_conflict_in(&Config::default().dirs).is_none());
+
+        // 原图目录 = 归档目录：archive 会把原图当重复份删掉，必须拦
+        let mut d = Config::default().dirs;
+        d.insert("arc".into(), "05_JPG图".into());
+        let msg = dirs_conflict_in(&d).expect("应判定为冲突");
+        assert!(msg.contains("原图目录") && msg.contains("归档目录"), "{msg}");
+
+        // 大小写、分隔符、结尾斜杠都算同一个目录
+        let mut d2 = Config::default().dirs;
+        d2.insert("jpg".into(), "A/B".into());
+        d2.insert("arc".into(), "a\\b\\".into());
+        assert!(dirs_conflict_in(&d2).is_some());
+
+        // 换个名字就合法
+        let mut d3 = Config::default().dirs;
+        d3.insert("arc".into(), "A/B/归档".into());
+        assert!(dirs_conflict_in(&d3).is_none());
     }
 
     #[test]

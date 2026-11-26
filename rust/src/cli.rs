@@ -137,6 +137,15 @@ pub fn run(argv: Vec<String>) -> i32 {
         }
     };
 
+    // 配置层面的硬约束：四个目录必须互不相同。会写文件的三个命令一律拒绝执行；
+    // doctor 是只读的，留着让人自查。
+    if matches!(args.cmd.as_str(), "new" | "ingest" | "archive") {
+        if let Some(msg) = config::dirs_conflict() {
+            eprintln!("\n{}{}\n", ui::C_ERR, msg);
+            return 2;
+        }
+    }
+
     progress::enable(args.progress);
     let root = resolve_root(&args);
 
