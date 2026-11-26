@@ -495,20 +495,49 @@ def cmd_ingest(args):
     dst_jpg = batch_dir(p["jpg"], name)
 
     plan = {"raw": [], "jpg": [], "other": [], "skip": [], "conflict": [],
-            "dup_same": [], "dup_diff": [], "renamed": []}
+            "dup_same": [], "dup_diff": [], "renamed": [], "target_clash": []}
     families = {}       # (kind, 文件名小写) -> [[源文件, 目标路径], ...]，同名文件的全部内容版本
     used_names = set()  # (kind, 目标文件名小写)，避免 _2/_3 撞名
+
+    files = sorted(iter_files(src), key=lambda p: str(p).lower())
+
+    # 卡里所有会被导入的文件名，先收齐。
+    # 改名时必须绕开它们：卡里本来就有一张 DSC1_2.jpg 的时候，改名改出来的
+    # DSC1_2.jpg 会在执行阶段把它顶掉 —— 报告说「3 个成功」，实际只落 2 个。
+    reserved = set()
+    for f in files:
+        ext = f.suffix.lower()
+        if ext in RAW_EXT:
+            reserved.add(("raw", f.name.lower()))
+        elif ext in JPG_EXT:
+            reserved.add(("jpg", f.name.lower()))
 
     def alt_name(kind, dst_dir, f):
         """卡内同名但内容不同：加 _2/_3 后缀，避免覆盖或丢片。"""
         n = 2
         while True:
             cand = dst_dir / f"{f.stem}_{n}{f.suffix}"
-            if not cand.exists() and (kind, cand.name.lower()) not in used_names:
+            key = (kind, cand.name.lower())
+            # 三重回避：目标已存在、本批已经分配过、卡里本来就叫这个名字
+            if (not cand.exists()
+                    and key not in used_names
+                    and (key not in reserved or cand.name.lower() == f.name.lower())):
                 return cand
             n += 1
 
-    files = sorted(iter_files(src), key=lambda p: str(p).lower())
+    def find_twin(dst_dir, f):
+        """
+        上一次 --dedupe 把这张存成了 DSC1_2.jpg，这次要认出来。
+        否则每次重跑都报「冲突」，逼着人一个个看。
+        """
+        n = 2
+        while True:
+            cand = dst_dir / f"{f.stem}_{n}{f.suffix}"
+            if not cand.exists():
+                return None
+            if same_content(f, cand):
+                return cand
+            n += 1
     progress(0, len(files), "扫描")
     for i, f in enumerate(files, 1):
         # 重复分发时最慢的是这里（同名文件要两头各算一遍哈希），进度放在最前面，
@@ -530,6 +559,10 @@ def cmd_ingest(args):
         if dst.exists():
             if same_content(f, dst):
                 plan["skip"].append(dst)
+                continue
+            twin = find_twin(dst_dir, f)
+            if twin is not None:
+                plan["dup_same"].append((f, twin))
             else:
                 try:
                     same_size = dst.stat().st_size == f.stat().st_size
@@ -561,6 +594,20 @@ def cmd_ingest(args):
 
         versions.append([f, target])
         plan[kind].append((f, target))
+
+    # 收尾再验一遍：计划里不能有两个源文件落到同一个目标名上。
+    # 真出现了就是会静默覆盖丢片，宁可拦下来报冲突。
+    seen_target = {}
+    for kind in ("raw", "jpg"):
+        keep = []
+        for s, target in plan[kind]:
+            key = (kind, target.name.lower())
+            if key in seen_target:
+                plan["target_clash"].append((s, target, seen_target[key]))
+                continue
+            seen_target[key] = s
+            keep.append((s, target))
+        plan[kind] = keep
 
     total_bytes = sum(f.stat().st_size for f, _ in plan["raw"] + plan["jpg"])
 
@@ -598,11 +645,19 @@ def cmd_ingest(args):
             print(f"       源   {s}  ({human(s.stat().st_size)})")
             print(f"       已有 {d}  ({human(d.stat().st_size)}，{reason})")
 
+    if plan["target_clash"]:
+        print(f"\n{C_WARN}两个源文件算出了同一个目标名 {len(plan['target_clash'])} 个 —— 已拦下，不复制：")
+        for s, d, first in plan["target_clash"][:20]:
+            print(f"       {s}")
+            print(f"       会和 {first} 一起落到 {d.name}")
+        print("       这是脚本分配文件名时出的错，不是你的问题。加 --dedupe 重跑，或先手动改名。")
+
     if not args.apply:
         print(f"\n加 --apply 真正复制。想锁定这份清单，就加 --expect-plan {token}")
         return
 
-    errors = 0
+    errors = raced = 0
+    copied = {"raw": 0, "jpg": 0}
     plan_total = len(plan["raw"]) + len(plan["jpg"])
     done = 0
     progress(0, plan_total, "复制")
@@ -610,16 +665,25 @@ def cmd_ingest(args):
         dst_dir.mkdir(parents=True, exist_ok=True)
         for i, (s, d) in enumerate(plan[kind], 1):
             done += 1
+            # 计划之后、落盘之前，目标位置被别的程序占了：报出来，绝不覆盖
+            if d.exists():
+                raced += 1
+                print(f"{C_ERR}{s.name}: 目标位置在执行期间被占用，跳过（不覆盖）")
+                progress(done, plan_total, "复制")
+                continue
             try:
                 copy_verified(s, d, verify=args.verify)
             except OSError as e:
                 errors += 1
                 print(f"{C_ERR}{s.name}: {e}")
             else:
+                copied[kind] += 1
                 if i % 50 == 0:
                     print(f"       {label} {i}/{len(plan[kind])} ...")
             progress(done, plan_total, "复制")
-    print(f"\n完成：RAW {len(plan['raw'])} 个，JPG {len(plan['jpg'])} 个，失败 {errors} 个。")
+    print(f"\n完成：RAW {copied['raw']} 个，JPG {copied['jpg']} 个，失败 {errors} 个。")
+    if raced:
+        print(f"（另有 {raced} 个的目标位置在执行期间被别的程序占了，已跳过，未覆盖）")
     if errors:
         print("失败项未复制，请检查网络连接后重跑（已复制的会自动跳过）。")
 
@@ -630,6 +694,9 @@ def cmd_ingest(args):
 # 之后从这张 DNG 导出的 JPG 也会带着这个中缀，匹配原图前要先把它剥掉，
 # 否则 DSC07287-已增强-降噪-ed.JPG 永远对不上 DSC07287.JPG。
 DENOISE_SUFFIXES = ("-已增强-降噪", "-Enhanced-NR")
+# LR 里「在 Photoshop 中编辑」再导出，文件名会带上 -Edit：DSC1-Edit-ed.jpg。
+# 不剥掉这一层，就永远对不上 DSC1.JPG。
+EDIT_SUFFIXES = ("-Edit",)
 
 
 def strip_ed(stem):
@@ -637,10 +704,16 @@ def strip_ed(stem):
     if not m:
         return None
     base = m.group("base")
-    low = base.lower()
-    for suf in DENOISE_SUFFIXES:
-        if low.endswith(suf.lower()):
-            return base[: -len(suf)]
+    # 一层层剥：DSC1-Edit-已增强-降噪-ed 要先去掉降噪，再去掉 -Edit
+    changed = True
+    while changed:
+        changed = False
+        low = base.lower()
+        for suf in DENOISE_SUFFIXES + EDIT_SUFFIXES:
+            if low.endswith(suf.lower()) and len(base) > len(suf):
+                base = base[: -len(suf)]
+                changed = True
+                break
     return base
 
 
@@ -662,17 +735,41 @@ def cmd_archive(args):
         for f in iter_files(jpg_dir):
             index.setdefault(f.stem.lower(), {}).setdefault(f.suffix.lower(), []).append(f)
 
-    # 99 里已归档的，按「主名 + 扩展名」索引：IMG.png 不能证明 IMG.jpg 已归档
+    # 99 里已归档的，按「主名 + 扩展名」索引：IMG.png 不能证明 IMG.jpg 已归档。
+    # 另外按主名再收一份，用来认出「已归档，只是扩展名不同」这种情况。
     arc_index = set()
+    arc_by_stem = {}
     if arc_dir.is_dir():
         for f in iter_files(arc_dir):
             arc_index.add((f.stem.lower(), f.suffix.lower()))
+            arc_by_stem.setdefault(f.stem.lower(), set()).add(f.suffix.lower())
 
     moved, already, missing, orphan = [], [], [], []
+    archived_other, redundant, siblings_left = [], [], []
     ambiguous, shared, conflicts = [], [], []
     claimed = {}       # 原图 -> 认领它的成品，保证一张原图只归档一次
     referenced = set() # 被任何成品指向过的原图，用于算「未修」
 
+    def logged_names():
+        """
+        归档日志里记过的原图文件名。
+
+        用来区分两种「99 里有个同名不同格式的文件」：一种是我们自己上一趟移过去的
+        （HEIC 原图配 JPG 成品），另一种来路不明 —— 后者仍然要按「找不到原图」报警。
+        """
+        names = set()
+        try:
+            for log_file in p["logs"].glob("archive-*.tsv"):
+                with log_file.open(encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        bits = line.rstrip("\n").split("\t")
+                        if len(bits) >= 3:
+                            names.add(bits[2].lower())
+        except OSError:
+            pass
+        return names
+
+    logged = logged_names()
     ed_files = sorted(x for x in iter_files(ed_dir) if x.is_file())
     progress(0, len(ed_files), "匹配")
     for i, f in enumerate(ed_files, 1):
@@ -703,12 +800,26 @@ def cmd_archive(args):
         if not cand:
             if (base.lower(), ext) in arc_index:
                 already.append((f, base))
+            elif base.lower() in arc_by_stem and any(
+                    f"{base}{e}".lower() in logged for e in arc_by_stem[base.lower()]):
+                # 原图目录里没了，归档里有一份同名不同格式的，而且日志证明确实是我们
+                # 自己上一趟移过去的 —— 那是「已归档，只是换了格式」，不该报找不到。
+                archived_other.append((f, base, sorted(arc_by_stem[base.lower()])))
             else:
                 missing.append((f, base))
             continue
 
         h = cand[0]
         referenced.add(h)
+
+        # 同一张照片可能同时有 .jpg 和 .heic 两份原图。按「匹配不唯一就不动手」的规矩，
+        # 这里只报出来，不自动搬：多格式的导出件也可能是有意留着的。
+        # 但要标成「被指向过」，免得它们被算进「未修」里 —— 这些照片明明是修过的。
+        for sib in [x for lst in groups.values() for x in lst if x is not h]:
+            referenced.add(sib)
+            if any(sib == seen for _, seen in siblings_left):
+                continue
+            siblings_left.append((f, sib))
 
         if h in claimed:
             shared.append((f, h, claimed[h]))
@@ -720,6 +831,7 @@ def cmd_archive(args):
             if same_content(h, d):
                 claimed[h] = f
                 already.append((f, base))
+                redundant.append(h)        # 原图目录里这份是重复的，执行时删掉
             else:
                 conflicts.append((f, h, d))
             continue
@@ -741,6 +853,23 @@ def cmd_archive(args):
     print(f"原图目录保留（未修） {len(untouched):>4} 个")
     if already:
         print(f"{C_INFO}已在归档中 {len(already)} 个（重复跑命令不会出错）")
+    if redundant:
+        print(f"{C_INFO}归档目录里已经有同内容的一份 {len(redundant)} 个"
+              f" —— 执行时会删掉原图目录里的重复份：")
+        for h in redundant[:20]:
+            print(f"       {h.name}")
+    if archived_other:
+        print(f"\n{C_INFO}原图目录里已经没有了，归档目录里有一份同名的其它格式 "
+              f"{len(archived_other)} 个（日志里记着是之前归档过去的）：")
+        for f, base, exts in archived_other[:20]:
+            print(f"       {f.name}  -> 归档里是 {base}{'、'.join(exts)}")
+    if siblings_left:
+        print(f"\n{C_WARN}同一张照片在原图目录里还有其它格式的原图 "
+              f"{len(siblings_left)} 个 —— 没动，需你确认：")
+        for f, sib in siblings_left[:20]:
+            print(f"       {sib.name}（成品 {f.name} 对应的那张已经归档，这份还在原图目录里）")
+        print("       是同一张照片的另一种格式（比如 HEIC 原图 + JPG 成品）就手动挪进归档目录；")
+        print("       是有意留着的导出件就不用管。脚本不替你判断。")
     if shared:
         print(f"{C_INFO}多张成品对应同一张原图 {len(shared)} 组 —— 只归档一次：")
         for f, h, first in shared[:20]:
@@ -782,7 +911,7 @@ def cmd_archive(args):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"archive-{_dt.date.today():%Y-%m}.tsv"
 
-    errors = skipped = copied = 0
+    errors = skipped = cross_vol = removed = 0
     progress(0, len(moved), "归档")
     with log_path.open("a", encoding="utf-8") as log:
         stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -795,17 +924,34 @@ def cmd_archive(args):
                     how = move_verified(h, d)
                     log.write(f"{stamp}\t{name}\t{h.name}\t{h}\t{d}\n")
                     if how == "copy":
-                        copied += 1
+                        cross_vol += 1
                 except OSError as e:
                     errors += 1
                     print(f"{C_ERR}{h.name}: {e}")
             progress(i, len(moved), "归档")
 
+        # 归档里已经有同内容的一份，原图目录这份是重复的。
+        # 删之前再比一次哈希：这中间要是被换过内容，就留着不动。
+        for h in redundant:
+            keep = arc_dir / h.name
+            try:
+                if not same_content(h, keep):
+                    raise OSError("内容已变化，未删除")
+                h.unlink()
+                removed += 1
+                log.write(f"{stamp}\t{name}\t{h.name}\t{h}\t{keep}\t"
+                          f"归档里已有同内容，删掉原图目录里的重复份\n")
+            except OSError as e:
+                errors += 1
+                print(f"{C_ERR}{h.name}: 删除重复份失败：{e}")
+
     ok = len(moved) - errors - skipped
     print(f"\n完成：归档 {ok} 个，已在归档中 {len(already)} 个，"
           f"内容冲突 {len(conflicts)} 个，失败 {errors} 个。")
-    if copied:
-        print(f"（其中 {copied} 个不在同一个卷上，是复制 + 哈希校验 + 删源，不是原子改名）")
+    if removed:
+        print(f"（另有 {removed} 个在归档目录里已有同内容的一份，原图目录里的重复份已删除）")
+    if cross_vol:
+        print(f"（其中 {cross_vol} 个不在同一个卷上，是复制 + 哈希校验 + 删源，不是原子改名）")
     if skipped:
         print(f"（执行期间另有 {skipped} 个目标已被占用，未计入归档）")
     print(f"日志：{log_path}")
@@ -894,7 +1040,7 @@ def cmd_doctor(args):
 
     progress(5, 7, "体检")
     # 5. 该归档但没归档的（极相册里会重复的根源）
-    pending = []
+    pending, only_other = [], []
     for n in sorted(sets["ed"]):
         ed_dir = p["ed"] / n
         jpg_dir = p["jpg"] / n
@@ -903,17 +1049,31 @@ def cmd_doctor(args):
         index = {}
         for f in iter_files(jpg_dir):
             index.setdefault(f.stem.lower(), []).append(f)
-        cnt = 0
+        cnt = other = 0
         for f in iter_files(ed_dir):
             base = strip_ed(f.stem)
-            if base and index.get(base.lower()):
+            cands = index.get(base.lower()) if base else None
+            if not cands:
+                continue
+            # 扩展名对得上才算「这张原图还没归档」；只剩别的格式的，
+            # 说明对应格式已经归档过了，只是同名文件还有另一份。
+            if any(c.suffix.lower() == f.suffix.lower() for c in cands):
                 cnt += 1
+            else:
+                other += 1
         if cnt:
             pending.append((n, cnt))
+        if other:
+            only_other.append((n, other))
     if pending:
         print("-- 已修但原图还没归档（相册里会重复显示） --")
         for n, cnt in pending:
             issue(C_WARN, f"{n}：{cnt} 张  ->  python photoflow.py archive {n} --apply")
+        print()
+    if only_other:
+        print("-- 成品对应的原图已归档，但原图目录里还留着别的格式 --")
+        for n, cnt in only_other:
+            issue(C_INFO, f"{n}：{cnt} 张（同名的 HEIC / TIF 之类还在原图目录里，脚本不自动搬）")
         print()
 
     progress(6, 7, "体检")
