@@ -124,7 +124,9 @@ async function start(name, apply) {
       status("输入改过了，或者还没有预演过。请先点「预演」看清清单。");
       return;
     }
-    const ok = window.confirm(
+    // 必须 await：Tauri 的 dialog 插件把 window.confirm 换成了 async 版本，
+    // 不 await 拿到的只是一个 Promise（永远为真），弹窗还没点就已经开跑了。
+    const ok = await window.confirm(
       `即将真正执行「${TITLE[name]}」，这会改动照片库里的文件。\n\n` +
       `只执行刚才预演确认过的那份清单；如果这期间目录里多了、少了或者有文件被改动，` +
       `程序会停下来要求重新预演。\n\n确定继续？`

@@ -189,10 +189,18 @@ fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// 一次读多少字节算哈希。
+///
+/// 别改成 1 MiB：这个缓冲是栈上的局部数组，而 Windows 主线程默认栈只有 1 MiB，
+/// 函数一进门就会撑爆栈（报 `thread 'main' has overflowed its stack`，
+/// 而且和文件大小无关——只要走到 `--verify` 或同名文件比对就必现）。
+/// 64 KiB 对顺序读的吞吐已经够用，还保住「内存占用与文件大小无关」。
+const READ_BUF: usize = 64 * 1024;
+
 /// 一遍算 SHA-256，返回 32 字节摘要。
 pub fn hash_reader<R: std::io::Read>(mut r: R) -> std::io::Result<[u8; 32]> {
     let mut h = Sha256::new();
-    let mut buf = [0u8; 1 << 20];
+    let mut buf = [0u8; READ_BUF];
     loop {
         let n = r.read(&mut buf)?;
         if n == 0 {
@@ -247,5 +255,29 @@ mod tests {
             hex,
             "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
         );
+    }
+
+    /// Windows 主线程默认只有 1 MiB 栈。这里用一个同样大小的线程模拟它，
+    /// 守住「读文件的缓冲必须是小的栈数组或堆内存」这条线——`READ_BUF`
+    /// 一旦被调回 1 MiB，这个测试会直接把进程撑崩（栈溢出不会被捕获）。
+    #[test]
+    fn hash_reader_fits_in_windows_sized_stack() {
+        let path = std::env::temp_dir().join(format!("pf-stack-{}", std::process::id()));
+        // 比一个读缓冲大得多，确保真的走了多轮 read
+        std::fs::write(&path, vec![b'x'; 3 * 1024 * 1024]).unwrap();
+
+        let p = path.clone();
+        let out = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let f = std::fs::File::open(&p).unwrap();
+                hash_reader(f).unwrap()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(out.len(), 32);
+        let _ = std::fs::remove_file(&path);
     }
 }

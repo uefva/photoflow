@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCRIPT = HERE / "photoflow.py"
+SCRIPT = HERE.parent / "photoflow.py"
 BATCH = "2026-12-20-压测"
 
 try:

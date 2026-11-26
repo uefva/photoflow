@@ -22,7 +22,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCRIPT = HERE / "photoflow.py"
+SCRIPT = HERE.parent / "photoflow.py"
 
 DIR_RAW = "04_RAW原图"
 DIR_JPG = "05_JPG图"

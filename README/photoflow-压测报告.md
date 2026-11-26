@@ -1,7 +1,7 @@
 # photoflow 压力测试报告
 
 测试日期：2026-12-20
-被测版本：`photoflow.py`（含图形界面、可配置目录、单一批次选择器）
+被测版本：`python/photoflow.py`（含图形界面、可配置目录、单一批次选择器）
 被测命令：`new` / `ingest` / `archive` / `doctor`
 
 ---
@@ -29,7 +29,7 @@
 
 ## 三、测试方法
 
-`stress_test.py` 依次执行：
+`python/stress_test.py` 依次执行：
 
 1. **造卡**：按目标总量和文件数生成假照片，一半 `.CR3`、一半 `.JPG`，大小带 ±20% 抖动，分放在两个子目录（模拟相机的 `100CANON` / `101CANON`）。
 2. **建批次**：`new --apply`。
@@ -141,16 +141,16 @@ photoflow ingest <卡> <批次> --quick --apply
 
 ```bash
 # 10GB / 200 个大文件（需要约 20GB 空闲空间）
-python stress_test.py --workdir D:\stress --size-gb 10 --files 200
+python python/stress_test.py --workdir D:\stress --size-gb 10 --files 200
 
 # 10GB / 2 万个小文件
-python stress_test.py --workdir D:\stress --size-gb 10 --files 20000
+python python/stress_test.py --workdir D:\stress --size-gb 10 --files 20000
 
 # 只测扫描、不真实写入（几乎不占空间）
-python stress_test.py --workdir D:\stress --size-gb 10 --files 20000 --sparse
+python python/stress_test.py --workdir D:\stress --size-gb 10 --files 20000 --sparse
 
 # 保留现场排查
-python stress_test.py --workdir D:\stress --size-gb 10 --files 200 --keep
+python python/stress_test.py --workdir D:\stress --size-gb 10 --files 200 --keep
 ```
 
 脚本默认跑完删除临时数据；中途 Ctrl-C 不会触发清理，需手动删除 workdir。

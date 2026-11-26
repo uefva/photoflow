@@ -1,8 +1,10 @@
 # photoflow 工作流评审报告
 
 评审日期：2026-11-26
-评审对象：`photoflow.py`（2016 行，含图形界面）、`photoflow.bat`、`test/` 下三个测试脚本、README 与两份说明文档
+评审对象：`python/photoflow.py`（2016 行，含图形界面）、`python/photoflow.bat`、`python/test/` 下三个测试脚本、README 与两份说明文档
 评审方式：通读代码 + 实跑测试 + 在临时目录复现边界场景（未触碰真实照片库 J 盘）
+
+> **后续状态。** 本报告记录的是评审当时的代码状态。仓库此后已重排为 `python/`（原版）和 `rust/`（移植版 + Tauri 界面）两个实现；P2-3（测试脚本路径）已修复，`python/test/test_photoflow.py` 现在 24 条全部通过；P2-1（默认根目录）按使用者决定保留现状。其余条目没有逐条复核，判断请以当前代码为准。
 
 ---
 
