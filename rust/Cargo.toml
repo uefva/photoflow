@@ -1,0 +1,18 @@
+[package]
+name = "photoflow-rs"
+version = "0.2.0"
+edition = "2021"
+description = "照片库工作流工具：建批次 / 分发 / 归档 / 体检（photoflow 的 Rust 版）"
+
+[[bin]]
+name = "photoflow"
+path = "src/main.rs"
+
+# 刻意零第三方依赖：和原 Python 版「单文件、无依赖」保持一致，
+# 也方便在没有网络的机器上直接 cargo build。
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

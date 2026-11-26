@@ -1,0 +1,22 @@
+[package]
+name = "photoflow-gui"
+version = "0.1.0"
+edition = "2021"
+description = "photoflow 的桌面界面（Tauri）"
+
+# 独立成自己的 workspace 根，免得被上层 crate 的 cargo 命令带进去
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+photoflow-rs = { path = "../.." }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>photoflow · 照片库工作流</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="head">
+  <div class="head-top">
+    <span class="wordmark">photoflow</span>
+    <span id="root-hint" class="hint"></span>
+  </div>
+  <div class="field">
+    <label for="root">照片库根目录</label>
+    <input id="root" type="text" spellcheck="false" placeholder="例如 J:\sata11-…\05_相册\my摄影照片-合集">
+    <button id="pick-root" class="small">浏览…</button>
+    <button id="open-root" class="small">打开</button>
+  </div>
+  <div class="field">
+    <label for="batch">当前批次</label>
+    <input id="batch" type="text" spellcheck="false" list="batch-list" placeholder="YYYY-MM-DD-地点">
+    <datalist id="batch-list"></datalist>
+    <button id="refresh-batches" class="small">刷新</button>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="new">建批次</button>
+  <button class="tab" data-tab="ingest">从卡分发</button>
+  <button class="tab" data-tab="archive">归档</button>
+  <button class="tab" data-tab="doctor">体检</button>
+  <button class="tab" data-tab="settings">设置</button>
+</nav>
+
+<main>
+  <!-- 建批次 -->
+  <section class="panel active" id="panel-new">
+    <h2>建一个批次</h2>
+    <p class="desc">批次名在上方「当前批次」里填，格式 YYYY-MM-DD-地点。这里只负责按这个名字一次建好
+      RAW、原图、成品、归档四个同名目录。</p>
+    <div class="readout"><span class="key">将创建的批次</span><span id="new-batch" class="val">（还没填）</span></div>
+    <pre class="console" id="out-new">先点「预演」看清单，确认无误后再点「执行」。</pre>
+    <div class="actions">
+      <button class="secondary" data-preview="new">预演</button>
+      <button class="primary" data-apply="new" disabled>执行</button>
+    </div>
+    <div class="bar"><div class="fill" id="bar-new"></div></div>
+  </section>
+
+  <!-- 从卡分发 -->
+  <section class="panel" id="panel-ingest">
+    <h2>从卡里分发</h2>
+    <p class="desc">相机 RAW 进 RAW 目录，JPG / HEIC / PNG / TIFF 进原图目录，视频等其余文件跳过。
+      同名文件先比大小、再比 SHA-256，内容相同才算重复。</p>
+    <div class="field">
+      <label for="src">源目录</label>
+      <input id="src" type="text" spellcheck="false" placeholder="相机存储卡或已拷到本机的目录，例如 F:\DCIM">
+      <button id="pick-src" class="small">浏览…</button>
+    </div>
+    <div class="checks">
+      <label class="check"><input type="checkbox" id="dedupe"> 卡内同名不同内容时自动加 _2/_3</label>
+      <label class="check"><input type="checkbox" id="verify"> 复制后逐个比 SHA-256（会明显变慢）</label>
+    </div>
+    <pre class="console" id="out-ingest">先点「预演」看清单，确认无误后再点「执行」。</pre>
+    <div class="actions">
+      <button class="secondary" data-preview="ingest">预演</button>
+      <button class="primary" data-apply="ingest" disabled>执行</button>
+    </div>
+    <div class="bar"><div class="fill" id="bar-ingest"></div></div>
+  </section>
+
+  <!-- 归档 -->
+  <section class="panel" id="panel-archive">
+    <h2>归档原图</h2>
+    <p class="desc">扫描成品目录里的 -ed 文件，剥掉后缀去原图目录找同名原图，移进归档目录。
+      移完之后这张照片在相册里只剩成品一份。没修的原图不动。</p>
+    <div class="readout"><span class="key">归档批次</span><span id="arc-batch" class="val">（还没填）</span></div>
+    <pre class="console" id="out-archive">先点「预演」看清单，确认无误后再点「执行」。</pre>
+    <div class="actions">
+      <button class="secondary" data-preview="archive">预演</button>
+      <button class="primary" data-apply="archive" disabled>执行</button>
+    </div>
+    <div class="bar"><div class="fill" id="bar-archive"></div></div>
+  </section>
+
+  <!-- 体检 -->
+  <section class="panel" id="panel-doctor">
+    <h2>全库体检</h2>
+    <p class="desc">只读，不改任何文件。检查批次命名、四个目录是否对齐、成品目录里散落的文件、
+      原图目录里的空目录，以及最关键的「已修但原图还没归档」。</p>
+    <pre class="console" id="out-doctor">点「运行」开始体检。</pre>
+    <div class="actions">
+      <button class="primary" data-preview="doctor">运行</button>
+    </div>
+    <div class="bar"><div class="fill" id="bar-doctor"></div></div>
+  </section>
+
+  <!-- 设置 -->
+  <section class="panel" id="panel-settings">
+    <h2>目录设置</h2>
+    <p class="desc">这里改的是脚本去认哪四个文件夹，不会重命名或移动已有的文件夹。
+      改完必须保证照片库里确实叫这些名字，否则所有命令都会找不到目录。</p>
+    <div class="settings-grid">
+      <label for="dir-raw">RAW 目录</label><input id="dir-raw" class="mono" spellcheck="false">
+      <label for="dir-jpg">原图目录</label><input id="dir-jpg" class="mono" spellcheck="false">
+      <label for="dir-ed">成品目录</label><input id="dir-ed" class="mono" spellcheck="false">
+      <label for="dir-arc">归档目录</label><input id="dir-arc" class="mono" spellcheck="false">
+    </div>
+    <p class="hint-line" id="settings-hint"></p>
+    <div class="actions split">
+      <div>
+        <button class="secondary" id="reset-dirs">恢复默认</button>
+        <button class="secondary" id="open-config">打开配置目录</button>
+      </div>
+      <button class="primary" id="save-settings">保存</button>
+    </div>
+    <p class="tagline" id="config-path"></p>
+  </section>
+</main>
+
+<footer class="status">
+  <span id="status">就绪</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
