@@ -10,6 +10,7 @@ photoflow 复现测试。
 """
 
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -331,6 +333,144 @@ class ControlTests(Base):
         rc, out = run("doctor", "--root", self.root)
         self.assertEqual(rc, 0, out)
         self.assertIn("没发现问题", out, out)
+
+
+class HardeningTests(Base):
+    """
+    三个加固点：
+    1. 分发中途失败不能留下半截文件（否则下次被当成冲突，得手工清）。
+    2. 归档跨卷复制出错时，原图不能丢，也不能悄悄存一份错的。
+    3. 预演确认的清单要能锁住，执行时清单变了就拒绝。
+    """
+
+    def _load(self):
+        mod = load_module()
+        mod._PROGRESS["on"] = False
+        return mod
+
+    def test_21_分发中途失败不留下半截文件(self):
+        card = self.tmp / "card"
+        w(card / "IMG_0001.JPG", b"A" * 4000)
+
+        mod = self._load()
+        args = mod.build_parser().parse_args(
+            ["ingest", str(card), self.batch, "--root", str(self.root), "--apply"])
+
+        real = shutil.copy2
+
+        def half_then_fail(src, dst, **kw):
+            data = Path(src).read_bytes()
+            Path(dst).write_bytes(data[: len(data) // 2])   # 只写一半
+            raise OSError("模拟：传输中断")
+
+        mod.shutil.copy2 = half_then_fail
+        try:
+            with redirect_stdout(io.StringIO()):
+                mod.cmd_ingest(args)
+        finally:
+            mod.shutil.copy2 = real
+
+        jpg = self.root / DIR_JPG / self.batch
+        left = sorted(p.name for p in jpg.iterdir()) if jpg.is_dir() else []
+        self.assertEqual(left, [],
+                         f"复制失败后目录里留下了残留文件，下次会被当成冲突：{left}")
+
+    def test_22_verify开启时能发现大小相同但内容错误(self):
+        card = self.tmp / "card"
+        w(card / "IMG_0001.JPG", b"A" * 4000)
+
+        mod = self._load()
+        args = mod.build_parser().parse_args(
+            ["ingest", str(card), self.batch, "--root", str(self.root),
+             "--apply", "--verify"])
+
+        real = shutil.copy2
+
+        def same_size_wrong_bytes(src, dst, **kw):
+            n = Path(src).stat().st_size
+            Path(dst).write_bytes(b"X" * n)                 # 大小对，内容错
+            shutil.copystat(src, dst)
+
+        mod.shutil.copy2 = same_size_wrong_bytes
+        try:
+            with redirect_stdout(io.StringIO()):
+                mod.cmd_ingest(args)
+        finally:
+            mod.shutil.copy2 = real
+
+        jpg = self.root / DIR_JPG / self.batch
+        left = sorted(p.name for p in jpg.iterdir()) if jpg.is_dir() else []
+        self.assertEqual(left, [],
+                         f"--verify 没拦住内容不对的复制，库里出现了 {left}")
+
+    def test_23_归档跨卷复制失败时原图不能丢(self):
+        w(self.root / DIR_JPG / self.batch / "IMG_0001.JPG", b"O" * 4000)
+        w(self.root / DIR_ED / self.batch / "IMG_0001-ed.JPG", b"e" * 100)
+
+        mod = self._load()
+        args = mod.build_parser().parse_args(
+            ["archive", self.batch, "--root", str(self.root), "--apply"])
+
+        real_rename = os.rename
+        real_copy2 = shutil.copy2
+
+        def cross_device(*a, **kw):
+            raise OSError(18, "Invalid cross-device link")
+
+        def same_size_wrong_bytes(src, dst, **kw):
+            n = Path(src).stat().st_size
+            Path(dst).write_bytes(b"X" * n)
+            shutil.copystat(src, dst)
+
+        mod.os.rename = cross_device          # 逼它走「复制 + 删源」那条路
+        mod.shutil.copy2 = same_size_wrong_bytes
+        try:
+            with redirect_stdout(io.StringIO()) as buf:
+                mod.cmd_archive(args)
+        finally:
+            os.rename = real_rename
+            shutil.copy2 = real_copy2
+
+        out = buf.getvalue()
+        src = self.root / DIR_JPG / self.batch / "IMG_0001.JPG"
+        self.assertTrue(src.exists(), "跨卷复制校验失败时，原图被删了：\n" + out)
+        self.assertEqual(self.files(DIR_ARC / self.batch), [],
+                         "校验失败的内容落进了归档目录：\n" + out)
+        self.assertIn("失败 1 个", out, out)
+
+    def test_24_清单变了就拒绝执行(self):
+        for i in (1, 2):
+            w(self.root / DIR_JPG / self.batch / f"IMG_{i:04d}.JPG", b"o" * 100)
+            w(self.root / DIR_ED / self.batch / f"IMG_{i:04d}-ed.JPG", b"e" * 50)
+
+        rc, out = run("archive", self.batch, "--root", self.root, "--progress")
+        self.assertEqual(rc, 0, out)
+        tokens = [l.split("\t")[1] for l in out.splitlines()
+                  if l.startswith("@@PLAN@@")]
+        self.assertTrue(tokens, "预演没有输出计划指纹：\n" + out)
+        token = tokens[0]
+
+        # 预演之后又多了一组照片
+        w(self.root / DIR_JPG / self.batch / "IMG_0003.JPG", b"o" * 100)
+        w(self.root / DIR_ED / self.batch / "IMG_0003-ed.JPG", b"e" * 50)
+
+        rc, out = run("archive", self.batch, "--root", self.root,
+                      "--expect-plan", token, "--apply")
+        self.assertNotEqual(rc, 0, "清单已经变了，却照旧执行了：\n" + out)
+        self.assertIn("计划已经变了", out, out)
+        self.assertEqual(self.files(DIR_ARC / self.batch), [],
+                         "拒绝执行时不应该动任何文件：\n" + out)
+
+        # 重新预演拿到新指纹后，才能执行
+        rc, out = run("archive", self.batch, "--root", self.root, "--progress")
+        token2 = [l.split("\t")[1] for l in out.splitlines()
+                  if l.startswith("@@PLAN@@")][0]
+        self.assertNotEqual(token, token2, "清单变了，指纹却没变")
+
+        rc, out = run("archive", self.batch, "--root", self.root,
+                      "--expect-plan", token2, "--apply")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.files(DIR_ARC / self.batch)), 3, out)
 
 
 if __name__ == "__main__":

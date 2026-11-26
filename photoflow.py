@@ -29,6 +29,7 @@ photoflow — 照片库工作流助手
 
 import argparse
 import datetime as _dt
+import errno
 import hashlib
 import json
 import os
@@ -97,6 +98,7 @@ C_INFO = " INFO "
 # 图形界面的进度条靠这一行前缀识别。只有加了 --progress 才会输出，
 # 普通命令行用法永远看不到这些行。
 PROGRESS_TAG = "@@PROGRESS@@"
+PLAN_TAG = "@@PLAN@@"
 _PROGRESS = {"on": False}
 
 
@@ -236,6 +238,100 @@ def same_content(a, b):
         return False
 
 
+TMP_SUFFIX = ".phototmp"
+
+
+def _drop(path):
+    """删掉一个文件，删不掉就算了 —— 清理路径不该反过来把主流程搞崩。"""
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def copy_verified(src, dst, verify=False):
+    """
+    先写临时文件，校验通过才落位。中途出任何事都不会在库里留下半截照片。
+
+    默认只比大小：能挡住截断（网络盘、读卡器掉线的主要表现），几乎不花时间。
+    加 verify 才两头各算一遍 SHA-256，能挡「大小一样但内容错了」的静默损坏，
+    代价是把源文件再读一遍。
+    """
+    tmp = dst.with_name(dst.name + TMP_SUFFIX)
+    try:
+        shutil.copy2(str(src), str(tmp))
+        if tmp.stat().st_size != src.stat().st_size:
+            raise OSError("大小校验不一致")
+        if verify and not same_content(src, tmp):
+            raise OSError("哈希校验不一致")
+        os.replace(str(tmp), str(dst))
+    except BaseException:
+        _drop(tmp)          # Ctrl-C 也要清干净
+        raise
+
+
+def move_verified(src, dst, verify=True):
+    """
+    同卷改名是原子的，直接做；只有跨卷才退化成「复制 → 校验 → 删源」。
+
+    shutil.move 在跨卷时复制完就删源，从不检查复制得对不对。归档目录放的是
+    长期保存的原图，这一步不能只信它。返回 "rename" 或 "copy"。
+    """
+    try:
+        os.rename(str(src), str(dst))
+        return "rename"
+    except OSError as e:
+        # 只有「不是同一个卷」才该退化成复制；权限之类的错误原样抛出去，
+        # 否则会被误当成跨卷，绕一大圈再报一个看不懂的错。
+        if not (getattr(e, "errno", None) == errno.EXDEV
+                or getattr(e, "winerror", None) == 17):
+            raise
+    copy_verified(src, dst, verify=verify)
+    os.unlink(str(src))
+    return "copy"
+
+
+def stat_sig(path):
+    """(大小, 修改时间)。文件不在了就返回 (None, None)，交给指纹去体现差异。"""
+    try:
+        st = path.stat()
+        return st.st_size, st.st_mtime_ns
+    except OSError:
+        return None, None
+
+
+def plan_token(rows):
+    """
+    把「这次要动哪些文件」压成一个短指纹。
+
+    只吃路径、大小、修改时间：内容不变、位置不变，指纹就不变。预演时算一次，
+    执行时再算一次，对不上就说明中间被动过。
+    """
+    h = hashlib.sha256()
+    for row in rows:
+        h.update("\x1f".join("" if x is None else str(x) for x in row)
+                 .encode("utf-8", "replace"))
+        h.update(b"\x1e")
+    return h.hexdigest()[:16]
+
+
+def announce_plan(token):
+    """把计划指纹交给图形界面。只有 --progress 时才输出，命令行用户看不到。"""
+    if _PROGRESS["on"]:
+        print(f"{PLAN_TAG}\t{token}", flush=True)
+
+
+def check_plan(expected, actual):
+    """执行前确认：现在这份计划，和用户预演时确认的那份还是不是同一份。"""
+    if expected and expected != actual:
+        die(f"计划已经变了，不能直接执行。\n"
+            f"  预演时：{expected}\n"
+            f"  现在　：{actual}\n"
+            f"这中间照片库里多了、少了、或者有文件被改动过。\n"
+            f"请重新预演，看清新的清单再执行。")
+
+
 def iter_files(folder):
     """递归列文件，跳过系统目录。"""
     if not folder.is_dir():
@@ -358,6 +454,11 @@ def cmd_new(args):
             + "\n".join(f"  {b}" for b in blocked)
             + "\n请先把这些文件移走或改名，再重新执行。")
 
+    # 预演确认的是「这 4 个路径现在各自是什么状态」，执行前再核对一次
+    token = plan_token([(label, str(path), path.is_dir()) for label, path in targets])
+    check_plan(getattr(args, "expect_plan", None), token)
+    announce_plan(token)
+
     confirm_apply(args.apply, f"为批次 {name} 建 4 个同名目录")
     created = existed = 0
     progress(0, len(targets), "建目录")
@@ -374,7 +475,7 @@ def cmd_new(args):
 
     print(f"\n新建 {created} 个，已存在 {existed} 个。")
     if not args.apply and created:
-        print("加 --apply 真正创建。")
+        print(f"加 --apply 真正创建。想锁定这份清单，就加 --expect-plan {token}")
 
 
 # ---------------------------------------------------------------- ingest
@@ -463,6 +564,12 @@ def cmd_ingest(args):
 
     total_bytes = sum(f.stat().st_size for f, _ in plan["raw"] + plan["jpg"])
 
+    # 清单 = 真正要复制的那些 (类型, 源, 目标, 大小, 修改时间)
+    token = plan_token([(kind, str(s), str(d)) + stat_sig(s)
+                        for kind in ("raw", "jpg") for s, d in plan[kind]])
+    check_plan(getattr(args, "expect_plan", None), token)
+    announce_plan(token)
+
     confirm_apply(args.apply, f"从 {src} 分发到批次 {name}")
     print(f"RAW  待复制 {len(plan['raw']):>4} 个")
     print(f"JPG  待复制 {len(plan['jpg']):>4} 个")
@@ -492,7 +599,7 @@ def cmd_ingest(args):
             print(f"       已有 {d}  ({human(d.stat().st_size)}，{reason})")
 
     if not args.apply:
-        print("\n加 --apply 真正复制。")
+        print(f"\n加 --apply 真正复制。想锁定这份清单，就加 --expect-plan {token}")
         return
 
     errors = 0
@@ -504,10 +611,7 @@ def cmd_ingest(args):
         for i, (s, d) in enumerate(plan[kind], 1):
             done += 1
             try:
-                shutil.copy2(s, d)
-                if d.stat().st_size != s.stat().st_size:
-                    d.unlink()
-                    raise OSError("大小校验不一致")
+                copy_verified(s, d, verify=args.verify)
             except OSError as e:
                 errors += 1
                 print(f"{C_ERR}{s.name}: {e}")
@@ -627,6 +731,11 @@ def cmd_archive(args):
     # 05 里没被任何成品指向的
     untouched = [f for f in iter_files(jpg_dir) if f not in referenced] if jpg_dir.is_dir() else []
 
+    # 清单 = 真正要移动的那些 (源, 目标, 大小, 修改时间)
+    token = plan_token([(str(h), str(d)) + stat_sig(h) for f, h, d, note in moved])
+    check_plan(getattr(args, "expect_plan", None), token)
+    announce_plan(token)
+
     confirm_apply(args.apply, f"归档批次 {name} 的原图 JPG")
     print(f"待归档 {len(moved):>4} 个")
     print(f"原图目录保留（未修） {len(untouched):>4} 个")
@@ -665,7 +774,7 @@ def cmd_archive(args):
             print(f"       …… 另有 {len(moved) - 40} 个")
 
     if not args.apply:
-        print("\n加 --apply 真正移动。")
+        print(f"\n加 --apply 真正移动。想锁定这份清单，就加 --expect-plan {token}")
         return
 
     arc_dir.mkdir(parents=True, exist_ok=True)
@@ -673,7 +782,7 @@ def cmd_archive(args):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"archive-{_dt.date.today():%Y-%m}.tsv"
 
-    errors = skipped = 0
+    errors = skipped = copied = 0
     progress(0, len(moved), "归档")
     with log_path.open("a", encoding="utf-8") as log:
         stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -683,8 +792,10 @@ def cmd_archive(args):
                 print(f"{C_INFO}目标已存在，跳过 {d.name}")
             else:
                 try:
-                    shutil.move(str(h), str(d))
+                    how = move_verified(h, d)
                     log.write(f"{stamp}\t{name}\t{h.name}\t{h}\t{d}\n")
+                    if how == "copy":
+                        copied += 1
                 except OSError as e:
                     errors += 1
                     print(f"{C_ERR}{h.name}: {e}")
@@ -693,6 +804,8 @@ def cmd_archive(args):
     ok = len(moved) - errors - skipped
     print(f"\n完成：归档 {ok} 个，已在归档中 {len(already)} 个，"
           f"内容冲突 {len(conflicts)} 个，失败 {errors} 个。")
+    if copied:
+        print(f"（其中 {copied} 个不在同一个卷上，是复制 + 哈希校验 + 删源，不是原子改名）")
     if skipped:
         print(f"（执行期间另有 {skipped} 个目标已被占用，未计入归档）")
     print(f"日志：{log_path}")
@@ -1001,6 +1114,7 @@ def _run_gui(tk, ttk, filedialog, messagebox, initial_root):
             self.batch_labels = []
             self.titles = {}
             self.bars = {}          # 页签名 -> 进度条
+            self.plan_tokens = {}   # 页签名 -> 预演时算出的清单指纹
             self.events = queue.Queue()
             self._pending_refresh = None
 
@@ -1412,6 +1526,7 @@ def _run_gui(tk, ttk, filedialog, messagebox, initial_root):
         def _do_preview(self, name, args, out):
             if args is None:
                 return
+            self.plan_tokens.pop(name, None)
 
             def done(code):
                 btn = self.apply_buttons.get(name)
@@ -1433,16 +1548,27 @@ def _run_gui(tk, ttk, filedialog, messagebox, initial_root):
                 messagebox.showwarning(
                     "请先预演", "输入改过，或者还没有预演过。\n请先点「预演」看清清单。")
                 return
+
+            token = self.plan_tokens.get(name)
+            if not token:
+                messagebox.showwarning(
+                    "请先预演",
+                    "没拿到这次的清单指纹，无法确认要动哪些文件。\n请重新点「预演」。")
+                return
+
             if not messagebox.askyesno(
                     "确认执行",
-                    f"即将真正执行「{self.titles[name]}」，这会改动照片库里的文件。\n\n确定继续？"):
+                    f"即将真正执行「{self.titles[name]}」，这会改动照片库里的文件。\n\n"
+                    f"只执行刚才预演确认过的那份清单；如果这期间目录里多了、少了或\n"
+                    f"有文件被改动，程序会停下来要求重新预演。\n\n确定继续？"):
                 return
             self._invalidate(name)
-            self.run_cli(name, args, out, None, apply=True)
+            self.run_cli(name, args, out, None, apply=True, expect_plan=token)
 
         # ---------------------------------------------------- 跑命令
 
-        def run_cli(self, name, args, out, on_done=None, apply=False):
+        def run_cli(self, name, args, out, on_done=None, apply=False,
+                    expect_plan=None):
             if self.busy:
                 messagebox.showinfo("请稍候", "上一个操作还没跑完。")
                 return
@@ -1453,6 +1579,8 @@ def _run_gui(tk, ttk, filedialog, messagebox, initial_root):
 
             cmd = [sys.executable, "-I", str(script), *args,
                    "--root", root, "--progress"]
+            if expect_plan:
+                cmd += ["--expect-plan", expect_plan]
             if apply:
                 cmd.append("--apply")
 
@@ -1482,6 +1610,11 @@ def _run_gui(tk, ttk, filedialog, messagebox, initial_root):
                     return
                 try:
                     for line in proc.stdout:
+                        if line.startswith(PLAN_TAG):
+                            bits = line.rstrip("\r\n").split("\t")
+                            if len(bits) > 1:
+                                self.events.put(("plan", name, bits[1].strip()))
+                            continue
                         if line.startswith(PROGRESS_TAG):
                             bits = line.rstrip("\r\n").split("\t")
                             if len(bits) >= 3:
@@ -1511,6 +1644,11 @@ def _run_gui(tk, ttk, filedialog, messagebox, initial_root):
                     ev = self.events.get_nowait()
                 except queue.Empty:
                     break
+
+                if ev[0] == "plan":
+                    _, pname, token = ev
+                    self.plan_tokens[pname] = token
+                    continue
 
                 if ev[0] == "prog":
                     _, bar, done, total, label = ev
@@ -1626,6 +1764,9 @@ def build_parser():
                              f"{DEFAULT_ROOT}）")
     common.add_argument("--progress", action="store_true",
                         help="输出机器可读的进度行（图形界面用，命令行不需要）")
+    common.add_argument("--expect-plan", default=None, metavar="指纹",
+                        help="只有图形界面会传：把预演时的清单指纹带过来，"
+                             "执行前核对清单有没有变过")
 
     ap = argparse.ArgumentParser(
         prog="photoflow",
@@ -1654,6 +1795,8 @@ def build_parser():
                    help="确认清单无误后真正执行（不加只预演）")
     s.add_argument("--dedupe", action="store_true",
                    help="卡内同名但内容不同时，自动加 _2/_3 后缀而不是跳过")
+    s.add_argument("--verify", action="store_true",
+                   help="复制完再逐个比 SHA-256（默认只比大小）；能把卡重读一遍，会明显变慢")
     s.set_defaults(func=cmd_ingest)
 
     s = sub.add_parser("archive", parents=[common], help="把已修照片的 JPG 原图移进归档目录")
