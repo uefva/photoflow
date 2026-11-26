@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-photoflow — 极空间摄影工作流助手
+photoflow — 照片库工作流助手
 
 目录约定（与现有结构完全一致，不新增、不改名）：
   <root>/04_RAW原图/<批次>/           相机 RAW 底片
@@ -12,6 +12,8 @@ photoflow — 极空间摄影工作流助手
 所有会改动文件的命令默认只做预演（dry-run），确认清单无误后加 --apply 才真正执行。
 
 用法示例：
+  python photoflow.py gui                  打开图形界面（也可直接双击 photoflow.bat）
+
   python photoflow.py new 2026-11-25-香炉石
   python photoflow.py new 2026-11-25-香炉石 --apply
 
@@ -27,6 +29,7 @@ photoflow — 极空间摄影工作流助手
 import argparse
 import datetime as _dt
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -41,12 +44,36 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-DEFAULT_ROOT = r"J:\sata11-17665442547\05_相册\my摄影照片-合集"
+DEFAULT_ROOT = r"E:\TMP\outputs"
 
-DIR_RAW = "04_RAW原图"
-DIR_JPG = "05_JPG图"
-DIR_ED = "03_缓存-调色ed"
-DIR_ARC = os.path.join("99_图库", "原图JPG归档")
+# 四个业务目录的默认名字。用户可以在配置文件或界面的「设置」里改，
+# 改完 CLI 和图形界面都跟着走，不需要动代码。
+DEFAULT_DIRS = {
+    "raw": "04_RAW原图",
+    "jpg": "05_JPG图",
+    "ed": "03_缓存-调色ed",
+    "arc": os.path.join("99_图库", "原图JPG归档"),
+}
+
+# 兼容旧代码：这两组名字作为默认值保留，实际路径一律走 _CONFIG。
+DIR_RAW = DEFAULT_DIRS["raw"]
+DIR_JPG = DEFAULT_DIRS["jpg"]
+DIR_ED = DEFAULT_DIRS["ed"]
+DIR_ARC = DEFAULT_DIRS["arc"]
+
+# 配置文件位置。测试或多套照片库可以用环境变量 PHOTOFLOW_CONFIG 指到别处。
+CONFIG_PATH = Path(os.environ.get("PHOTOFLOW_CONFIG") or (Path.home() / ".photoflow.json"))
+
+_CONFIG = {"root": None, "batch": "", "dirs": dict(DEFAULT_DIRS)}
+
+# 输出里给用户看的名字。一律用「RAW 目录 / 原图目录 / 成品目录 / 归档目录」这种说法，
+# 不写 03/04/05/99 这类编号——换个不熟悉目录结构的人看，编号等于天书。
+AREA_NAME = {
+    "raw": "RAW 目录",
+    "jpg": "原图目录",
+    "ed": "成品目录",
+    "arc": "归档目录",
+}
 
 RAW_EXT = {".cr2", ".cr3", ".nef", ".nrw", ".arw", ".srf", ".sr2", ".raf",
            ".dng", ".orf", ".rw2", ".pef", ".srw", ".raw", ".3fr", ".x3f"}
@@ -68,22 +95,77 @@ C_INFO = " INFO "
 
 # ---------------------------------------------------------------- 基础设施
 
+def check_dir_setting(value):
+    """校验一个目录设置项。返回错误说明，None 表示可以用。"""
+    if not value or not value.strip():
+        return "不能为空"
+    v = value.strip()
+    if os.path.isabs(v) or re.match(r"^[A-Za-z]:", v):
+        return "要写相对路径，不要写盘符或绝对路径"
+    parts = re.split(r"[\\/]", v)
+    if any(seg in ("", ".", "..") for seg in parts):
+        return "不能包含空段、. 或 .."
+    if any(ch in v for ch in '<>:"|?*') or any(ord(ch) < 32 for ch in v):
+        return "含有不能用于文件名的字符"
+    return None
+
+
+def load_config(path=None):
+    """读配置文件。读不到、或某一项不合法，就退回默认值，不报错。"""
+    cfg = Path(path) if path else CONFIG_PATH
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except Exception:                                        # noqa: BLE001
+        return _CONFIG
+    if not isinstance(data, dict):
+        return _CONFIG
+
+    root = data.get("root")
+    if isinstance(root, str) and root.strip():
+        _CONFIG["root"] = root.strip()
+
+    batch = data.get("batch")
+    if isinstance(batch, str):
+        _CONFIG["batch"] = batch.strip()
+
+    dirs = data.get("dirs")
+    if isinstance(dirs, dict):
+        for key in DEFAULT_DIRS:
+            val = dirs.get(key)
+            if isinstance(val, str) and check_dir_setting(val) is None:
+                _CONFIG["dirs"][key] = os.path.normpath(val.strip())
+    return _CONFIG
+
+
+def save_config(path=None):
+    cfg = Path(path) if path else CONFIG_PATH
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"root": _CONFIG["root"], "batch": _CONFIG["batch"],
+                               "dirs": dict(_CONFIG["dirs"])},
+                              ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def dir_name(key):
+    """当前生效的目录名（相对照片库根目录）。"""
+    return _CONFIG["dirs"][key]
+
+
 def paths(root):
     r = Path(root)
     return {
-        "raw": r / DIR_RAW,
-        "jpg": r / DIR_JPG,
-        "ed": r / DIR_ED,
-        "arc": r / DIR_ARC,
-        "logs": r / DIR_ARC / "_logs",
+        "raw": r / dir_name("raw"),
+        "jpg": r / dir_name("jpg"),
+        "ed": r / dir_name("ed"),
+        "arc": r / dir_name("arc"),
+        "logs": r / dir_name("arc") / "_logs",
     }
 
 
 def check_root(root):
     p = paths(root)
     if not p["raw"].is_dir():
-        die(f"找不到目录：{p['raw']}\n"
-            f"J 盘没挂载？或者用 --root 指定正确的根目录。")
+        die(f"找不到 RAW 目录：{p['raw']}\n"
+            f"照片库所在的盘没挂载，或者路径填错了。可以用 --root 指定正确的根目录。")
     return p
 
 
@@ -429,7 +511,8 @@ def cmd_archive(args):
 
     if not ed_dir.is_dir():
         die(f"找不到成品目录：{ed_dir}\n"
-            f"（03 里还没有这个批次？先导出成品再归档。）")
+            f"（这个批次还没有修好的照片。先在 Lightroom 里导出，文件名带 -ed，"
+            f"放进这个目录之后再归档。）")
 
     # 05 里的原图：主名 -> 扩展名 -> [文件]。扩展名参与匹配，避免同主名不同格式被一锅端。
     index = {}
@@ -469,7 +552,7 @@ def cmd_archive(args):
 
         if len(cand) > 1:
             referenced.update(cand)
-            ambiguous.append((f, cand, "同名同扩展名，但 05 里有多个文件"))
+            ambiguous.append((f, cand, "同名同扩展名，但原图目录里有多个文件"))
             continue
 
         if not cand:
@@ -505,7 +588,7 @@ def cmd_archive(args):
 
     confirm_apply(args.apply, f"归档批次 {name} 的原图 JPG")
     print(f"待归档 {len(moved):>4} 个")
-    print(f"05 保留（未修） {len(untouched):>4} 个")
+    print(f"原图目录保留（未修） {len(untouched):>4} 个")
     if already:
         print(f"{C_INFO}已在归档中 {len(already)} 个（重复跑命令不会出错）")
     if shared:
@@ -519,21 +602,21 @@ def cmd_archive(args):
             for c in cand[:5]:
                 print(f"           候选 {c}")
     if conflicts:
-        print(f"\n{C_WARN}冲突：99 里已有同名但内容不同的文件 {len(conflicts)} 个 —— 不覆盖：")
+        print(f"\n{C_WARN}冲突：归档目录里已有同名但内容不同的文件 {len(conflicts)} 个 —— 不覆盖：")
         for f, h, d in conflicts[:20]:
-            print(f"       05 {h}")
-            print(f"       99 {d}  （内容不同）")
+            print(f"       原图 {h}")
+            print(f"       归档 {d}  （内容不同）")
     if missing:
-        print(f"\n{C_WARN}03 有成品但 05 和 99 都找不到原图 {len(missing)} 个 —— 需你人工确认：")
+        print(f"\n{C_WARN}有成品，但原图目录和归档目录里都找不到对应原图 {len(missing)} 个 —— 需你人工确认：")
         for f, base in missing[:30]:
             print(f"       {f.name}  -> 找不到 {base}.*")
     if orphan:
-        print(f"\n{C_WARN}03 里没有 -ed 后缀的文件 {len(orphan)} 个 —— 不在归档判定范围内：")
+        print(f"\n{C_WARN}成品目录里没有 -ed 后缀的文件 {len(orphan)} 个 —— 不在归档判定范围内：")
         for f in orphan[:30]:
             print(f"       {f}")
 
     if moved:
-        print(f"\n将移动（05 -> 99）：")
+        print(f"\n将移动（原图目录 → 归档目录）：")
         for f, h, d, note in moved[:40]:
             extra = f"  [{note}]" if note else ""
             print(f"       {h.name:<32} {human(h.stat().st_size):>9}{extra}")
@@ -571,7 +654,7 @@ def cmd_archive(args):
         print(f"（执行期间另有 {skipped} 个目标已被占用，未计入归档）")
     print(f"日志：{log_path}")
     if untouched:
-        print(f"05 里还剩 {len(untouched)} 个未修原图，继续在极相册可见。")
+        print(f"原图目录里还剩 {len(untouched)} 个未修原图，继续在相册里可见。")
 
 
 # ---------------------------------------------------------------- doctor
@@ -590,16 +673,16 @@ def cmd_doctor(args):
     sets = {k: set(batch_name_list(p[k])) for k in ("raw", "jpg", "ed", "arc")}
     all_names = set().union(*sets.values())
 
-    print(f"批次数量：04={len(sets['raw'])}  05={len(sets['jpg'])}  "
-          f"03={len(sets['ed'])}  99={len(sets['arc'])}\n")
+    print(f"批次数量：RAW={len(sets['raw'])}  原图={len(sets['jpg'])}  "
+          f"成品={len(sets['ed'])}  归档={len(sets['arc'])}\n")
 
     # 0. 顶层目录缺失（后面的检查都依赖这些目录，先说明白）
-    labels = {"raw": DIR_RAW, "jpg": DIR_JPG, "ed": DIR_ED, "arc": DIR_ARC}
+    labels = {k: dir_name(k) for k in ("raw", "jpg", "ed", "arc")}
     gone = [k for k in ("jpg", "ed", "arc") if not p[k].is_dir()]
     if gone:
         print("-- 顶层目录缺失 --")
         for k in gone:
-            issue(C_WARN, f"{labels[k]} 不存在，相关检查已跳过")
+            issue(C_WARN, f"{AREA_NAME[k]}（{labels[k]}）不存在，相关检查已跳过")
         print()
 
     # 1. 命名合规
@@ -621,16 +704,17 @@ def cmd_doctor(args):
         if must:
             disagree.append((n, have, must))
     if disagree:
-        print("-- 04/05 缺目录 --")
+        print("-- 批次目录不齐 --")
         for n, have, lack in disagree:
-            issue(C_WARN, f"{n}：有 {'/'.join(have) or '无'}，缺 {'/'.join(lack)}")
+            issue(C_WARN, f"{n}：有 {'、'.join(AREA_NAME[k] for k in have) or '无'}，"
+                          f"缺 {'、'.join(AREA_NAME[k] for k in lack)}")
         print()
 
     # 3. 03 根目录散落文件
     stray = (sorted(f for f in p["ed"].iterdir() if f.is_file())
              if p["ed"].is_dir() else [])
     if stray:
-        print("-- 03 根目录散落文件 --")
+        print("-- 成品目录根部散落的文件 --")
         for f in stray:
             issue(C_WARN, f"{f.name}  ({human(f.stat().st_size)})  {_dt.datetime.fromtimestamp(f.stat().st_mtime):%Y-%m-%d}")
         print()
@@ -642,7 +726,7 @@ def cmd_doctor(args):
             if not any(iter_files(d)):
                 empty.append(d)
     if empty:
-        print("-- 05 空目录（可删） --")
+        print("-- 原图目录里的空目录（可删） --")
         for d in empty:
             issue(C_INFO, str(d))
         print()
@@ -665,7 +749,7 @@ def cmd_doctor(args):
         if cnt:
             pending.append((n, cnt))
     if pending:
-        print("-- 已修但原图还没归档（极相册会重复显示） --")
+        print("-- 已修但原图还没归档（相册里会重复显示） --")
         for n, cnt in pending:
             issue(C_WARN, f"{n}：{cnt} 张  ->  python photoflow.py archive {n} --apply")
         print()
@@ -677,7 +761,7 @@ def cmd_doctor(args):
             if strip_ed(f.stem) is None:
                 odd.append(f)
     if odd:
-        print("-- 03 里不带 -ed 的成品 --")
+        print("-- 成品目录里不带 -ed 的文件 --")
         for f in odd[:30]:
             issue(C_INFO, str(f))
         print()
@@ -688,28 +772,584 @@ def cmd_doctor(args):
         print(f"共 {issues} 项需要关注。WARN 建议处理，INFO 仅供参考。")
 
 
+# ---------------------------------------------------------------- GUI
+
+def _run_gui(tk, ttk, filedialog, messagebox, initial_root):
+    """
+    tkinter 界面。
+
+    界面本身不做任何文件操作，只负责把参数拼成一条命令行、调用同一个 photoflow.py，
+    再把输出原样显示出来。这样 GUI 和命令行永远走同一套逻辑，不会各有一套实现。
+    每个操作都保持「先预演、再执行」：没预演过、或预演后改了输入，「执行」按钮是灰的。
+    """
+    import queue
+    import subprocess
+    import threading
+    from pathlib import Path
+
+    script = Path(__file__).resolve()
+
+    class App:
+        def __init__(self, master):
+            self.master = master
+            master.title("photoflow · 照片库工作流")
+            master.geometry("980x740")
+            master.minsize(860, 640)
+            master.columnconfigure(0, weight=1)
+            master.rowconfigure(1, weight=1)
+
+            self.busy = False
+            self.previewed = {}
+            self.apply_buttons = {}
+            self._preview_btns = {}
+            self.batch_labels = []
+            self.titles = {}
+            self.results = queue.Queue()
+            self._pending_refresh = None
+
+            self._build_root_bar()
+            self._build_tabs()
+            self._build_status()
+            self._load_config()
+            self.refresh_batches()
+            self._poll()
+
+        # ---------------------------------------------------- 顶部：根目录
+
+        def _build_root_bar(self):
+            bar = ttk.Frame(self.master, padding=(16, 14, 16, 6))
+            bar.grid(row=0, column=0, sticky="ew")
+            bar.columnconfigure(1, weight=1)
+
+            ttk.Label(bar, text="照片库根目录").grid(row=0, column=0, padx=(0, 10))
+            self.root_var = tk.StringVar(value=initial_root)
+            ttk.Entry(bar, textvariable=self.root_var).grid(row=0, column=1, sticky="ew")
+            ttk.Button(bar, text="浏览…", width=8,
+                       command=self._pick_root).grid(row=0, column=2, padx=6)
+            ttk.Button(bar, text="打开", width=6,
+                       command=self._open_root).grid(row=0, column=3)
+
+            # 当前批次：整个窗口只有这一处能改，三个页签都读它，
+            # 避免在每个页签各选一次、选串了。
+            ttk.Label(bar, text="当前批次").grid(row=1, column=0, padx=(0, 10), pady=(8, 0))
+            self.batch_var = tk.StringVar()
+            self.batch_box = ttk.Combobox(bar, textvariable=self.batch_var,
+                                          postcommand=self.refresh_batches)
+            self.batch_box.grid(row=1, column=1, sticky="ew", pady=(8, 0))
+            self.batch_var.trace_add("write", lambda *a: self._on_batch_changed())
+            ttk.Button(bar, text="刷新", width=6,
+                       command=self.refresh_batches).grid(row=1, column=2, padx=6, pady=(8, 0))
+
+            self.root_hint = ttk.Label(bar, text="")
+            self.root_hint.grid(row=2, column=1, sticky="w", pady=(5, 0))
+            self.root_var.trace_add("write", lambda *a: self._on_root_changed())
+
+        def _on_root_changed(self):
+            for name in ("new", "ingest", "archive"):
+                self._invalidate(name)
+            raw = self.root_var.get().strip().strip('"')
+            if not raw:
+                self.root_hint.configure(text="")
+                return
+            if (Path(raw) / dir_name("raw")).is_dir():
+                self.root_hint.configure(text="✓ 目录可用", foreground="#059669")
+                if self._pending_refresh:
+                    self.master.after_cancel(self._pending_refresh)
+                self._pending_refresh = self.master.after(500, self.refresh_batches)
+            else:
+                self.root_hint.configure(
+                    text=f"✗ 找不到 RAW 目录（{dir_name('raw')}），检查路径或网络盘是否连上", foreground="#b91c1c")
+
+        def _on_batch_changed(self):
+            for name in ("new", "ingest", "archive"):
+                self._invalidate(name)
+            cur = self.batch_var.get().strip()
+            shown = cur or "（还没填）"
+            for lbl, prefix in self.batch_labels:
+                lbl.configure(text=f"{prefix}：{shown}")
+
+        def _batch_label(self, parent, prefix):
+            """页签里只读显示当前批次，改要去上方那一行改。"""
+            lbl = ttk.Label(parent, text="", foreground="#1f2937")
+            lbl.pack(anchor="w", pady=(6, 12))
+            self.batch_labels.append((lbl, prefix))
+            self._on_batch_changed()
+            return lbl
+
+        def _current_batch(self):
+            name = self.batch_var.get().strip()
+            if not name:
+                messagebox.showwarning(
+                    "缺少批次", "先去上方「当前批次」填一个，例如 2026-11-26-梧桐山。")
+                return None
+            return name
+
+        def _pick_root(self):
+            cur = self.root_var.get().strip()
+            chosen = filedialog.askdirectory(
+                title="选择照片库根目录", initialdir=cur if Path(cur).is_dir() else "")
+            if chosen:
+                self.root_var.set(chosen)
+
+        def _open_root(self):
+            raw = self.root_var.get().strip().strip('"')
+            if not Path(raw).is_dir():
+                messagebox.showwarning("打不开", "这个路径不存在。")
+                return
+            try:
+                os.startfile(raw)          # 仅 Windows
+            except AttributeError:
+                messagebox.showinfo("提示", "当前系统不支持在文件管理器里直接打开。")
+            except OSError as e:
+                messagebox.showerror("打不开", str(e))
+
+        # ---------------------------------------------------- 四个页签
+
+        def _build_tabs(self):
+            nb = ttk.Notebook(self.master)
+            nb.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
+            self._tab_new(nb)
+            self._tab_ingest(nb)
+            self._tab_archive(nb)
+            self._tab_doctor(nb)
+            self._tab_settings(nb)
+
+        def _title(self, parent, text, sub=None):
+            ttk.Label(parent, text=text, font=("Segoe UI", 11, "bold")).pack(anchor="w")
+            if sub:
+                ttk.Label(parent, text=sub, foreground="#6b7280",
+                          wraplength=860, justify="left").pack(anchor="w", pady=(3, 10))
+            else:
+                ttk.Frame(parent, height=10).pack()
+
+        def _output(self, parent):
+            box = ttk.Frame(parent)
+            box.pack(fill="both", expand=True, pady=(12, 0))
+            box.columnconfigure(0, weight=1)
+            box.rowconfigure(0, weight=1)
+            txt = tk.Text(box, height=16, wrap="none", font=("Consolas", 10),
+                          background="#fbfbfd", relief="solid", borderwidth=1,
+                          padx=10, pady=8)
+            ysb = ttk.Scrollbar(box, orient="vertical", command=txt.yview)
+            xsb = ttk.Scrollbar(box, orient="horizontal", command=txt.xview)
+            txt.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+            txt.grid(row=0, column=0, sticky="nsew")
+            ysb.grid(row=0, column=1, sticky="ns")
+            xsb.grid(row=1, column=0, sticky="ew")
+            txt.insert("1.0", "先点「预演」看清单，确认无误后再点「执行」。")
+            txt.configure(state="disabled")
+            return txt
+
+        def _buttons(self, parent, name, with_apply=True):
+            """
+            先在底部占好位置，再让上面的输出框去填剩下的空间。
+
+            顺序反过来（先放输出框再放按钮）时，输出框的 expand 会把底部挤没，
+            按钮就跑到窗口外面去了。
+            """
+            row = ttk.Frame(parent)
+            row.pack(side="bottom", fill="x", pady=(12, 0))
+            prev = ttk.Button(row, text="预演" if with_apply else "运行", width=10)
+            prev.pack(side="left")
+            self._preview_btns[name] = prev
+            if with_apply:
+                btn = ttk.Button(row, text="执行", width=10)
+                btn.state(["disabled"])
+                btn.pack(side="left", padx=8)
+                self.apply_buttons[name] = btn
+
+        def _bind_actions(self, name, out, args_fn):
+            self._preview_btns[name].configure(
+                command=lambda: self._do_preview(name, args_fn(), out))
+            if name in self.apply_buttons:
+                self.apply_buttons[name].configure(
+                    command=lambda: self._do_apply(name, args_fn(), out))
+
+        def _tab_new(self, nb):
+            f = ttk.Frame(nb, padding=16)
+            nb.add(f, text="   建批次   ")
+            self.titles["new"] = "建批次"
+            self._title(f, "建一个批次",
+                        "批次名在上方「当前批次」里填，格式 YYYY-MM-DD-地点，例如 2026-11-26-梧桐山。"
+                        "这里只负责按这个名字一次建好 RAW、原图、成品、归档四个同名目录。")
+
+            self._batch_label(f, "将创建的批次")
+
+            self._buttons(f, "new")
+            out = self._output(f)
+            self._bind_actions("new", out, self._args_new)
+
+        def _tab_ingest(self, nb):
+            f = ttk.Frame(nb, padding=16)
+            nb.add(f, text="   从卡分发   ")
+            self.titles["ingest"] = "从卡分发"
+            self._title(f, "把卡里的照片分发进照片库",
+                        "相机 RAW 进 RAW 目录，JPG / HEIC / PNG / TIFF 进原图目录，视频等其余文件跳过。"
+                        "同名文件会先比大小、再比 SHA-256，内容不同就报冲突，不会覆盖。")
+
+            ttk.Label(f, text="源目录").pack(anchor="w")
+            row1 = ttk.Frame(f)
+            row1.pack(fill="x", pady=(4, 12))
+            self.ingest_src = tk.StringVar()
+            self.ingest_src.trace_add("write", lambda *a: self._invalidate("ingest"))
+            ttk.Entry(row1, textvariable=self.ingest_src).pack(
+                side="left", fill="x", expand=True)
+            ttk.Button(row1, text="浏览…", width=8,
+                       command=self._pick_src).pack(side="left", padx=6)
+
+            self._batch_label(f, "目标批次（跟随上方「当前批次」）")
+
+            self.ingest_dedupe = tk.BooleanVar(value=False)
+            self.ingest_dedupe.trace_add("write", lambda *a: self._invalidate("ingest"))
+            ttk.Checkbutton(
+                f, variable=self.ingest_dedupe,
+                text="卡内同名但内容不同时自动加 _2 后缀（不勾选则报冲突、不导入）"
+            ).pack(anchor="w")
+
+            self._buttons(f, "ingest")
+            out = self._output(f)
+            self._bind_actions("ingest", out, self._args_ingest)
+
+        def _tab_archive(self, nb):
+            f = ttk.Frame(nb, padding=16)
+            nb.add(f, text="   归档   ")
+            self.titles["archive"] = "归档"
+            self._title(f, "把已修照片的原图移进归档",
+                        "按成品目录里的 -ed 成品，反查原图目录里的同名原图，移进归档目录。"
+                        "移完之后这张照片在相册里只剩成品一份，原图退出时间线。没修的原图不动。")
+
+            self._batch_label(f, "要归档的批次（跟随上方「当前批次」）")
+
+            self._buttons(f, "archive")
+            out = self._output(f)
+            self._bind_actions("archive", out, self._args_archive)
+
+        def _tab_doctor(self, nb):
+            f = ttk.Frame(nb, padding=16)
+            nb.add(f, text="   体检   ")
+            self.titles["doctor"] = "体检"
+            self._title(f, "全库体检",
+                        "只读，不改任何文件。检查批次命名、四个目录是否对齐、成品目录里散落的文件、"
+                        "原图目录里的空目录，以及最关键的「已修但原图还没归档」。")
+
+            self._buttons(f, "doctor", with_apply=False)
+            out = self._output(f)
+            self._bind_actions("doctor", out, self._args_doctor)
+
+        def _tab_settings(self, nb):
+            f = ttk.Frame(nb, padding=16)
+            nb.add(f, text="   设置   ")
+            self.titles["settings"] = "设置"
+            self._title(f, "目录设置",
+                        "这里改的是脚本去认哪四个文件夹，不会重命名或移动已有的文件夹。"
+                        "改完必须保证照片库里确实叫这些名字，否则所有命令都会找不到目录。")
+
+            grid = ttk.Frame(f)
+            grid.pack(fill="x", pady=(0, 8))
+            grid.columnconfigure(1, weight=1)
+
+            self.dir_vars = {}
+            for row, key in enumerate(("raw", "jpg", "ed", "arc")):
+                ttk.Label(grid, text=AREA_NAME[key], width=10).grid(
+                    row=row, column=0, sticky="w", pady=4)
+                var = tk.StringVar(value=dir_name(key))
+                self.dir_vars[key] = var
+                ttk.Entry(grid, textvariable=var, font=("Consolas", 10)).grid(
+                    row=row, column=1, sticky="ew", pady=4)
+
+            self.settings_hint = ttk.Label(f, text="", wraplength=860, justify="left")
+            self.settings_hint.pack(anchor="w", pady=(0, 10))
+
+            row = ttk.Frame(f)
+            row.pack(fill="x")
+            ttk.Button(row, text="保存", width=10,
+                       command=self._save_dirs).pack(side="left")
+            ttk.Button(row, text="恢复默认", width=10,
+                       command=self._reset_dirs).pack(side="left", padx=8)
+            ttk.Button(row, text="打开配置文件", width=14,
+                       command=self._open_config).pack(side="left")
+
+            ttk.Label(f, text=f"配置文件：{CONFIG_PATH}", foreground="#6b7280"
+                      ).pack(anchor="w", pady=(14, 0))
+
+        def _save_dirs(self):
+            new = {}
+            for key, var in self.dir_vars.items():
+                val = var.get().strip()
+                err = check_dir_setting(val)
+                if err:
+                    self.settings_hint.configure(
+                        text=f"{AREA_NAME[key]}：{err}", foreground="#b91c1c")
+                    return
+                new[key] = os.path.normpath(val)
+
+            if len({v.lower() for v in new.values()}) != len(new):
+                self.settings_hint.configure(
+                    text="四个目录不能重名，否则文件会互相覆盖。", foreground="#b91c1c")
+                return
+
+            _CONFIG["dirs"].update(new)
+            _CONFIG["root"] = self.root_var.get().strip()
+            _CONFIG["batch"] = self.batch_var.get().strip()
+            try:
+                save_config()
+            except OSError as e:
+                self.settings_hint.configure(text=f"保存失败：{e}", foreground="#b91c1c")
+                return
+
+            self.settings_hint.configure(text="已保存。", foreground="#059669")
+            self._on_root_changed()
+            self.refresh_batches()
+            self.set_status("目录设置已保存")
+
+        def _reset_dirs(self):
+            for key, var in self.dir_vars.items():
+                var.set(DEFAULT_DIRS[key])
+            self.settings_hint.configure(text="已恢复默认值，点「保存」才会生效。",
+                                         foreground="#b45309")
+
+        def _open_config(self):
+            try:
+                os.startfile(str(CONFIG_PATH))
+            except AttributeError:
+                messagebox.showinfo("配置文件", str(CONFIG_PATH))
+            except OSError as e:
+                messagebox.showerror("打不开", str(e))
+
+        # ---------------------------------------------------- 参数拼装
+
+        def _args_new(self):
+            name = self._current_batch()
+            if name is None:
+                return None
+            return ["new", name]
+
+        def _args_ingest(self):
+            src = self.ingest_src.get().strip().strip('"')
+            batch = self._current_batch()
+            if batch is None:
+                return None
+            if not src:
+                messagebox.showwarning("信息不全", "源目录要填。")
+                return None
+            if not Path(src).is_dir():
+                messagebox.showwarning("源目录不存在", f"找不到：{src}")
+                return None
+            args = ["ingest", src, batch]
+            if self.ingest_dedupe.get():
+                args.append("--dedupe")
+            return args
+
+        def _args_archive(self):
+            batch = self._current_batch()
+            if batch is None:
+                return None
+            return ["archive", batch]
+
+        def _args_doctor(self):
+            return ["doctor"]
+
+        def _pick_src(self):
+            cur = self.ingest_src.get().strip().strip('"')
+            chosen = filedialog.askdirectory(
+                title="选择相机存储卡或已拷到本机的目录",
+                initialdir=cur if Path(cur).is_dir() else "")
+            if chosen:
+                self.ingest_src.set(chosen)
+
+        # ---------------------------------------------------- 预演 / 执行
+
+        def _invalidate(self, name):
+            self.previewed[name] = None
+            btn = self.apply_buttons.get(name)
+            if btn is not None:
+                btn.state(["disabled"])
+
+        def _do_preview(self, name, args, out):
+            if args is None:
+                return
+
+            def done(code):
+                btn = self.apply_buttons.get(name)
+                if code == 0:
+                    self.previewed[name] = tuple(args)
+                    if btn is not None:
+                        btn.state(["!disabled"])
+                else:
+                    self.previewed[name] = None
+                    if btn is not None:
+                        btn.state(["disabled"])
+
+            self.run_cli(args, out, done)
+
+        def _do_apply(self, name, args, out):
+            if args is None:
+                return
+            if self.previewed.get(name) != tuple(args):
+                messagebox.showwarning(
+                    "请先预演", "输入改过，或者还没有预演过。\n请先点「预演」看清清单。")
+                return
+            if not messagebox.askyesno(
+                    "确认执行",
+                    f"即将真正执行「{self.titles[name]}」，这会改动照片库里的文件。\n\n确定继续？"):
+                return
+            self._invalidate(name)
+            self.run_cli(args, out, None, apply=True)
+
+        # ---------------------------------------------------- 跑命令
+
+        def run_cli(self, args, out, on_done=None, apply=False):
+            if self.busy:
+                messagebox.showinfo("请稍候", "上一个操作还没跑完。")
+                return
+            root = self.root_var.get().strip().strip('"')
+            if not root:
+                messagebox.showwarning("缺少根目录", "请先填写照片库根目录。")
+                return
+
+            cmd = [sys.executable, "-I", str(script), *args, "--root", root]
+            if apply:
+                cmd.append("--apply")
+
+            self.busy = True
+            self.set_status("运行中…")
+            header = "photoflow " + " ".join(args) + ("  --apply" if apply else "")
+            out.configure(state="normal")
+            out.delete("1.0", "end")
+            out.insert("end", "> " + header + "\n\n")
+            out.configure(state="disabled")
+
+            def worker():
+                try:
+                    p = subprocess.run(cmd, capture_output=True, text=True,
+                                       encoding="utf-8", errors="replace")
+                    text, code = (p.stdout or "") + (p.stderr or ""), p.returncode
+                except Exception as e:                      # noqa: BLE001
+                    text, code = f"启动失败：{e}", -1
+                self.results.put((out, text, code, on_done))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _poll(self):
+            try:
+                while True:
+                    out, text, code, on_done = self.results.get_nowait()
+                    self._finish(out, text, code, on_done)
+            except queue.Empty:
+                pass
+            self.master.after(80, self._poll)
+
+        def _finish(self, out, text, code, on_done):
+            out.configure(state="normal")
+            out.insert("end", text)
+            out.see("end")
+            out.configure(state="disabled")
+            self.busy = False
+            self.set_status("完成" if code == 0 else f"结束，退出码 {code}")
+            if on_done:
+                on_done(code)
+
+        # ---------------------------------------------------- 杂项
+
+        def refresh_batches(self):
+            self._pending_refresh = None
+            raw = self.root_var.get().strip().strip('"')
+            names = set()
+            if raw:
+                p = paths(raw)
+                for key in ("jpg", "raw", "ed"):
+                    names.update(batch_name_list(p[key]))
+            values = sorted(names, reverse=True)
+            self.batch_box["values"] = values
+
+        def set_status(self, text):
+            self.status_var.set(text)
+
+        def _build_status(self):
+            self.status_var = tk.StringVar(value="就绪")
+            bar = ttk.Frame(self.master, padding=(16, 4, 16, 12))
+            bar.grid(row=2, column=0, sticky="ew")
+            ttk.Label(bar, textvariable=self.status_var,
+                      foreground="#6b7280").pack(side="left")
+
+        def _load_config(self):
+            saved = _CONFIG.get("root")
+            if saved and Path(saved).is_dir():
+                self.root_var.set(saved)
+            else:
+                self._on_root_changed()
+            if _CONFIG.get("batch"):
+                self.batch_var.set(_CONFIG["batch"])
+
+        def _save_config(self):
+            try:
+                _CONFIG["root"] = self.root_var.get().strip()
+                _CONFIG["batch"] = self.batch_var.get().strip()
+                save_config()
+            except Exception:                                # noqa: BLE001
+                pass
+
+    try:
+        root = tk.Tk()
+    except Exception as e:                                   # noqa: BLE001
+        die(f"打不开窗口：{e}\n"
+            "（没有图形环境的话，请改用命令行：photoflow new / ingest / archive / doctor）")
+    try:
+        # 高 DPI 屏上别让界面糊成一片；失败就算了
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:                                        # noqa: BLE001
+        pass
+    try:
+        ttk.Style().theme_use("vista")
+    except Exception:                                        # noqa: BLE001
+        pass
+
+    app = App(root)
+    root.protocol("WM_DELETE_WINDOW", lambda: (app._save_config(), root.destroy()))
+    root.mainloop()
+
+
+def cmd_gui(args):
+    try:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
+    except Exception as e:                                   # noqa: BLE001
+        die("打不开图形界面：这台机器的 Python 没有可用的 tkinter。\n"
+            f"  {e}\n"
+            "命令行用法完全不受影响：photoflow new / ingest / archive / doctor")
+    _run_gui(tk, ttk, filedialog, messagebox, args.root)
+
+
 # ---------------------------------------------------------------- CLI
 
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--root", default=DEFAULT_ROOT,
-                        help=f"照片库根目录（默认 {DEFAULT_ROOT}）")
+    common.add_argument("--root", default=None,
+                        help="照片库根目录（默认读配置文件，其次 "
+                             f"{DEFAULT_ROOT}）")
 
     ap = argparse.ArgumentParser(
         prog="photoflow",
-        description="极空间摄影工作流助手：建批次 / 分发 / 归档 / 体检",
-        epilog="会改动文件的命令默认只预演，确认清单后加 --apply 执行。",
+        description="照片库工作流助手：建批次 / 分发 / 归档 / 体检 / 图形界面",
+        epilog=("会改动文件的命令默认只预演，确认清单后加 --apply 执行。\n"
+                "当前目录设置：RAW 目录 = {}，原图目录 = {}，成品目录 = {}，归档目录 = {}。"
+                "可以在 `photoflow gui` 的「设置」里改。").format(
+                    dir_name("raw"), dir_name("jpg"), dir_name("ed"), dir_name("arc")),
     )
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=False)
 
-    s = sub.add_parser("new", parents=[common], help="为一个批次建好 04/05/03/99 四个同名目录")
+    s = sub.add_parser("gui", parents=[common], help="打开图形界面")
+    s.set_defaults(func=cmd_gui)
+
+    s = sub.add_parser("new", parents=[common], help="为一个批次建好 RAW / 原图 / 成品 / 归档四个同名目录")
     s.add_argument("batch", help="批次名，如 2026-11-25-香炉石")
     s.add_argument("--force", action="store_true", help="批次名不合规也照建")
     s.add_argument("--apply", action="store_true",
                    help="确认清单无误后真正执行（不加只预演）")
     s.set_defaults(func=cmd_new)
 
-    s = sub.add_parser("ingest", parents=[common], help="把卡里的照片按 RAW/JPG 分发到 04/05")
+    s = sub.add_parser("ingest", parents=[common], help="把卡里的照片按 RAW/JPG 分发到 RAW 目录和原图目录")
     s.add_argument("src", help="源目录，如 F:\\DCIM")
     s.add_argument("batch", help="批次名")
     s.add_argument("--apply", action="store_true",
@@ -718,7 +1358,7 @@ def build_parser():
                    help="卡内同名但内容不同时，自动加 _2/_3 后缀而不是跳过")
     s.set_defaults(func=cmd_ingest)
 
-    s = sub.add_parser("archive", parents=[common], help="把已修照片的 JPG 原图从 05 移到 99")
+    s = sub.add_parser("archive", parents=[common], help="把已修照片的 JPG 原图移进归档目录")
     s.add_argument("batch", help="批次名")
     s.add_argument("--apply", action="store_true",
                    help="确认清单无误后真正执行（不加只预演）")
@@ -731,8 +1371,15 @@ def build_parser():
 
 
 def main():
+    load_config()
     ap = build_parser()
     args = ap.parse_args()
+    if not getattr(args, "root", None):
+        args.root = _CONFIG["root"] or DEFAULT_ROOT
+    if not getattr(args, "cmd", None):
+        ap.print_help()
+        print("\n提示：运行 `photoflow gui` 打开图形界面。")
+        sys.exit(2)
     args.func(args)
 
 
