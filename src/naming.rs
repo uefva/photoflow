@@ -347,6 +347,25 @@ pub fn ext_lower(p: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// 列一个目录下的文件（递归、按名称排序），最多返回 `limit` 个。
+///
+/// 返回 `(文件, 总数, 是否截断)`。`limit == 0` 表示不限。
+/// 界面预览用：批次可能有几千张，一次全塞给前端会把 JSON 和 DOM 都撑爆，
+/// 所以由后端先截断，并把真实总数带回去，界面才知道「还有多少没显示」。
+pub fn batch_files(dir: &Path, limit: usize) -> (Vec<PathBuf>, usize, bool) {
+    if !dir.is_dir() {
+        return (Vec::new(), 0, false);
+    }
+    let mut all = iter_files(dir);
+    let total = all.len();
+    if limit > 0 && total > limit {
+        all.truncate(limit);
+        (all, total, true)
+    } else {
+        (all, total, false)
+    }
+}
+
 pub fn stem_lower(p: &Path) -> String {
     p.file_stem()
         .map(|s| s.to_string_lossy().to_lowercase())
@@ -526,6 +545,33 @@ mod tests {
         // 也就不存在网络卷上 realpath 失败的问题）
         let ok = batch_dir(base, "2026-11-26-测试").unwrap();
         assert_eq!(ok.file_name().unwrap().to_string_lossy(), "2026-11-26-测试");
+    }
+
+    #[test]
+    fn batch_files_reports_total_and_truncation() {
+        let d = std::env::temp_dir().join(format!("pf-bf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for n in ["b.jpg", "a.jpg", "c.jpg"] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+
+        let (files, total, cut) = batch_files(&d, 2);
+        assert_eq!(files.len(), 2);
+        assert_eq!(total, 3);
+        assert!(cut, "超过上限要标记截断");
+        assert_eq!(files[0].file_name().unwrap(), "a.jpg", "按名称排序");
+
+        let (files, total, cut) = batch_files(&d, 0);
+        assert_eq!(files.len(), 3);
+        assert_eq!(total, 3);
+        assert!(!cut);
+
+        // 目录不存在：空结果，不报错
+        let (files, total, cut) = batch_files(&d.join("missing"), 10);
+        assert!(files.is_empty() && total == 0 && !cut);
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

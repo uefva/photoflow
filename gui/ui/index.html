@@ -31,6 +31,7 @@
   <button class="tab active" data-tab="new">建批次</button>
   <button class="tab" data-tab="ingest">从卡分发</button>
   <button class="tab" data-tab="archive">归档</button>
+  <button class="tab" data-tab="preview">批次预览</button>
   <button class="tab" data-tab="doctor">体检</button>
   <button class="tab" data-tab="settings">设置</button>
 </nav>
@@ -84,6 +85,30 @@
       <button class="primary" data-apply="archive" disabled>执行</button>
     </div>
     <div class="bar"><div class="fill" id="bar-archive"></div></div>
+  </section>
+
+  <!-- 批次预览 -->
+  <section class="panel" id="panel-preview">
+    <h2>批次预览</h2>
+    <p class="desc">只读，不改任何文件。左边选一个批次，右边按目录列出它包含的照片；双击一行可以在资源管理器里打开所在目录。</p>
+    <div class="preview-wrap">
+      <aside class="preview-side">
+        <div class="preview-side-head">
+          <span class="key">批次</span>
+          <button id="preview-refresh" class="small">刷新</button>
+        </div>
+        <div class="preview-batches" id="preview-batches"></div>
+      </aside>
+      <div class="preview-main">
+        <div class="preview-head">
+          <span class="preview-title" id="preview-title">还没选批次</span>
+          <div class="chips" id="preview-filter"></div>
+        </div>
+        <div class="preview-list" id="preview-list">
+          <div class="preview-empty">在左边选一个批次。</div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- 体检 -->

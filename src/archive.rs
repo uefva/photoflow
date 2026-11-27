@@ -56,6 +56,8 @@ struct ArchivePlan {
     siblings_left: Vec<(PathBuf, PathBuf)>,
     redundant: Vec<PathBuf>,
     untouched: usize,
+    /// 视频目录里这个批次的视频数。只统计，不参与归档、不移动。
+    videos: usize,
     token: String,
 }
 
@@ -93,6 +95,7 @@ fn build_plan(root: &Path, batch: &str) -> Result<ArchivePlan, String> {
     let ed_dir = batch_dir(&d.ed, batch)?;
     let jpg_dir = batch_dir(&d.jpg, batch)?;
     let arc_dir = batch_dir(&d.arc, batch)?;
+    let vid_dir = batch_dir(&d.vid, batch)?;
 
     // 兜底：即便配置校验被绕过（目录被符号链接 / junction 别名到一处），也绝不能让
     // 「归档」退化成「把原图当重复份删掉」。
@@ -283,6 +286,14 @@ fn build_plan(root: &Path, batch: &str) -> Result<ArchivePlan, String> {
         });
     }
 
+    // 视频目录里这个批次的视频：只报数，留在原地。
+    if vid_dir.is_dir() {
+        p.videos = iter_files(&vid_dir)
+            .into_iter()
+            .filter(|f| naming::is_video_ext(&ext_lower(f)))
+            .count();
+    }
+
     // 原图目录里没被任何成品指向的（只数照片；视频不属于照片流程）
     if jpg_dir.is_dir() {
         p.untouched = iter_files(&jpg_dir)
@@ -322,6 +333,9 @@ pub fn run(root: &Path, batch: &str, apply: bool, expect_plan: Option<&str>) -> 
     ui::confirm_apply(apply, &format!("归档批次 {batch} 的原图 JPG"));
     println!("待归档 {:>4} 个", p.moved.len());
     println!("原图目录保留（未修） {:>4} 个", p.untouched);
+    if p.videos > 0 {
+        println!("视频目录保留 {:>4} 个（不参与归档，留在原地）", p.videos);
+    }
 
     if p.already > 0 {
         println!(

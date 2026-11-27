@@ -1,9 +1,11 @@
 //! `doctor`：全库体检，只读不写。
 //!
-//! 八项检查，对应 `photoflow.py` 的 `cmd_doctor`：
+//! 十项检查：
 //!   0 顶层目录缺失  1 命名合规  2 四处目录不齐  3 成品目录根部散落
 //!   4 原图目录空目录  5 已修但没归档  6 成品目录里不带 -ed 的文件
-//!   7 视频文件（只报告，不参与照片流程）
+//!   7 视频批次对不上照片批次 / 视频空目录
+//!   8 视频目录里内容重复
+//!   9 照片目录里混入的视频（只报告，不参与照片流程）
 //!
 //! 第 5 项是最关键的一项：漏归档就是相册里出现重复照片的唯一原因。
 
@@ -15,7 +17,7 @@ use crate::naming::{
     self, area_name, batch_name_list, check_batch_name, ext_lower, human, iter_files, stem_lower,
     stem_raw, strip_ed,
 };
-use crate::{progress, timefmt, ui};
+use crate::{progress, sha256, timefmt, ui};
 
 pub fn run(root: &Path) -> Result<(), String> {
     let d = naming::check_root(root)?;
@@ -38,10 +40,14 @@ pub fn run(root: &Path) -> Result<(), String> {
         })
         .collect();
 
-    let mut all_names: BTreeSet<String> = BTreeSet::new();
+    let mut photo_names: BTreeSet<String> = BTreeSet::new();
     for s in sets.values() {
-        all_names.extend(s.iter().cloned());
+        photo_names.extend(s.iter().cloned());
     }
+    let vid_names: BTreeSet<String> = batch_name_list(&d.vid).into_iter().collect();
+    // 命名检查把视频批次也算进来，免得同一个不合规的名字漏报
+    let mut all_names = photo_names.clone();
+    all_names.extend(vid_names.iter().cloned());
 
     println!(
         "批次数量：RAW={}  原图={}  成品={}  归档={}  视频={}\n",
@@ -49,11 +55,11 @@ pub fn run(root: &Path) -> Result<(), String> {
         sets["jpg"].len(),
         sets["ed"].len(),
         sets["arc"].len(),
-        batch_name_list(&d.vid).len()
+        vid_names.len()
     );
 
     // 0. 顶层目录缺失
-    progress::progress(0, 8, "体检");
+    progress::progress(0, 10, "体检");
     let gone: Vec<&str> = ["jpg", "ed", "arc"]
         .into_iter()
         .filter(|k| {
@@ -80,7 +86,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     }
 
     // 1. 命名合规
-    progress::progress(1, 8, "体检");
+    progress::progress(1, 10, "体检");
     let bad_names: Vec<(String, String)> = all_names
         .iter()
         .filter_map(|n| check_batch_name(n).err().map(|hint| (n.clone(), hint)))
@@ -95,9 +101,9 @@ pub fn run(root: &Path) -> Result<(), String> {
     }
 
     // 2. 四处目录不齐
-    progress::progress(2, 8, "体检");
+    progress::progress(2, 10, "体检");
     let mut disagree: Vec<(String, Vec<&str>, Vec<&str>)> = Vec::new();
-    for n in &all_names {
+    for n in &photo_names {
         let mut have: Vec<&str> = Vec::new();
         let mut lack: Vec<&str> = Vec::new();
         for k in photo_keys {
@@ -137,7 +143,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     }
 
     // 3. 成品目录根部散落的文件
-    progress::progress(3, 8, "体检");
+    progress::progress(3, 10, "体检");
     let mut stray: Vec<std::path::PathBuf> = Vec::new();
     if d.ed.is_dir() {
         if let Ok(rd) = std::fs::read_dir(&d.ed) {
@@ -172,7 +178,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     }
 
     // 4. 原图目录里的空目录
-    progress::progress(4, 8, "体检");
+    progress::progress(4, 10, "体检");
     let mut empty: Vec<std::path::PathBuf> = Vec::new();
     if d.jpg.is_dir() {
         if let Ok(rd) = std::fs::read_dir(&d.jpg) {
@@ -199,7 +205,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     }
 
     // 5. 已修但原图还没归档
-    progress::progress(5, 8, "体检");
+    progress::progress(5, 10, "体检");
     let mut pending: Vec<(String, usize)> = Vec::new();
     let mut only_other: Vec<(String, usize)> = Vec::new();
     for n in &sets["ed"] {
@@ -270,7 +276,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     }
 
     // 6. 成品目录里不带 -ed 的文件
-    progress::progress(6, 8, "体检");
+    progress::progress(6, 10, "体检");
     let mut odd: Vec<std::path::PathBuf> = Vec::new();
     for n in &sets["ed"] {
         for f in iter_files(&d.ed.join(n)) {
@@ -288,8 +294,88 @@ pub fn run(root: &Path) -> Result<(), String> {
         println!();
     }
 
-    // 7. 视频：只报告，不参与照片流程（不计未修、不进归档匹配）
-    progress::progress(7, 8, "体检");
+    // 7. 视频目录：批次对不对得上、有没有空目录
+    progress::progress(7, 10, "体检");
+    let mut orphan_vid: Vec<&String> = Vec::new();
+    let mut empty_vid: Vec<String> = Vec::new();
+    for n in &vid_names {
+        if iter_files(&d.vid.join(n)).is_empty() {
+            // 空目录只报「可删」，不再重复报「对不上」
+            empty_vid.push(n.clone());
+        } else if !sets["raw"].contains(n) && !sets["jpg"].contains(n) {
+            orphan_vid.push(n);
+        }
+    }
+    if !orphan_vid.is_empty() || !empty_vid.is_empty() {
+        println!("-- 视频目录 --");
+        for n in &orphan_vid {
+            println!(
+                "{}视频目录里有 {}，但 RAW / 原图目录里没有同名批次",
+                ui::C_WARN, n
+            );
+            issues += 1;
+        }
+        for n in &empty_vid {
+            println!("{}{}：视频批次目录是空的（可删）", ui::C_INFO, n);
+            issues += 1;
+        }
+        println!();
+    }
+
+    // 8. 视频目录里内容相同的重复文件。
+    // 先按大小分组，只有大小撞了才去算 SHA-256——视频动辄几个 GB，
+    // 不能对每个文件都全量读一遍。
+    progress::progress(8, 10, "体检");
+    let mut vid_files: Vec<std::path::PathBuf> = Vec::new();
+    for n in &vid_names {
+        for f in iter_files(&d.vid.join(n)) {
+            if naming::is_video_ext(&ext_lower(&f)) {
+                vid_files.push(f);
+            }
+        }
+    }
+    let mut by_size: HashMap<u64, Vec<std::path::PathBuf>> = HashMap::new();
+    for f in vid_files {
+        let size = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
+        by_size.entry(size).or_default().push(f);
+    }
+    let mut dup_groups: Vec<Vec<std::path::PathBuf>> = Vec::new();
+    for (_, files) in by_size {
+        if files.len() < 2 {
+            continue;
+        }
+        let mut by_hash: HashMap<[u8; 32], Vec<std::path::PathBuf>> = HashMap::new();
+        for f in files {
+            if let Ok(fh) = std::fs::File::open(&f) {
+                if let Ok(h) = sha256::hash_reader(fh) {
+                    by_hash.entry(h).or_default().push(f);
+                }
+            }
+        }
+        for (_, group) in by_hash {
+            if group.len() > 1 {
+                dup_groups.push(group);
+            }
+        }
+    }
+    dup_groups.sort_by(|a, b| a[0].to_string_lossy().cmp(&b[0].to_string_lossy()));
+    if !dup_groups.is_empty() {
+        println!("-- 视频目录里内容相同的重复文件 --");
+        for group in dup_groups.iter().take(20) {
+            println!("{}同一内容 {} 份：", ui::C_INFO, group.len());
+            for f in group {
+                println!("       {}", f.display());
+            }
+        }
+        if dup_groups.len() > 20 {
+            println!("       …… 另有 {} 组", dup_groups.len() - 20);
+        }
+        issues += dup_groups.len();
+        println!();
+    }
+
+    // 9. 照片目录里混入的视频：只报告，不参与照片流程（不计未修、不进归档匹配）
+    progress::progress(9, 10, "体检");
     let mut vids: Vec<std::path::PathBuf> = Vec::new();
     for folder in [&d.jpg, &d.ed] {
         if !folder.is_dir() {
@@ -319,7 +405,7 @@ pub fn run(root: &Path) -> Result<(), String> {
         issues += 1;
     }
 
-    progress::progress(8, 8, "体检");
+    progress::progress(10, 10, "体检");
     if issues == 0 {
         println!("{}没发现问题。", ui::C_OK);
     } else {

@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use photoflow_rs::{config, naming};
+use photoflow_rs::{config, naming, timefmt};
 
 /// 界面启动时需要的全部状态。
 #[derive(Serialize)]
@@ -98,7 +98,7 @@ pub fn list_batches(root: String) -> Vec<String> {
     }
     let d = naming::dirs(&root);
     let mut names = BTreeSet::new();
-    for folder in [&d.jpg, &d.raw, &d.ed] {
+    for folder in [&d.jpg, &d.raw, &d.ed, &d.arc, &d.vid] {
         for n in naming::batch_name_list(folder) {
             names.insert(n);
         }
@@ -106,6 +106,105 @@ pub fn list_batches(root: String) -> Vec<String> {
     let mut v: Vec<String> = names.into_iter().collect();
     v.reverse(); // BTreeSet 是升序，倒过来让最近的在最上面
     v
+}
+
+/// 预览里单个文件。路径、大小、日期都原样给前端，界面不自己算。
+#[derive(Serialize)]
+pub struct BatchFile {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub date: String,
+    /// raw / photo / video / other —— 前端用来分组和显示标签
+    pub kind: String,
+}
+
+/// 一个目录的清单。`total` 是真实总数，`files` 可能被截断。
+#[derive(Serialize)]
+pub struct DirView {
+    pub total: usize,
+    pub truncated: bool,
+    pub files: Vec<BatchFile>,
+}
+
+/// 一个批次的四个目录。
+#[derive(Serialize)]
+pub struct BatchView {
+    pub batch: String,
+    pub raw: DirView,
+    pub jpg: DirView,
+    pub ed: DirView,
+    pub arc: DirView,
+    pub vid: DirView,
+}
+
+/// 单个目录最多返回多少条。批次可能有几千张，一次全塞给前端会把 JSON 和 DOM 都撑爆。
+const MAX_PREVIEW_FILES: usize = 2000;
+
+fn dir_view(dir: &Path) -> DirView {
+    let (paths, total, truncated) = naming::batch_files(dir, MAX_PREVIEW_FILES);
+    let files = paths
+        .into_iter()
+        .map(|p| {
+            let ext = naming::ext_lower(&p);
+            let kind = if naming::is_raw_ext(&ext) {
+                "raw"
+            } else if naming::is_jpg_ext(&ext) {
+                "photo"
+            } else if naming::is_video_ext(&ext) {
+                "video"
+            } else {
+                "other"
+            };
+            let md = std::fs::metadata(&p).ok();
+            let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
+            let date = md
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .map(timefmt::date_of)
+                .unwrap_or_default();
+            BatchFile {
+                name: p
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                path: p.to_string_lossy().to_string(),
+                size,
+                date,
+                kind: kind.to_string(),
+            }
+        })
+        .collect();
+    DirView {
+        total,
+        truncated,
+        files,
+    }
+}
+
+/// 「批次预览」页签：列出一个批次四个目录里的文件。只读。
+#[tauri::command]
+pub fn list_batch(root: String, batch: String) -> Result<BatchView, String> {
+    let root = PathBuf::from(root.trim());
+    if root.as_os_str().is_empty() {
+        return Err("还没设置照片库根目录".into());
+    }
+    let d = naming::dirs(&root);
+    // 用 batch_dir 校验批次名，防止 ../ 之类越界
+    let raw = naming::batch_dir(&d.raw, &batch)?;
+    let jpg = naming::batch_dir(&d.jpg, &batch)?;
+    let ed = naming::batch_dir(&d.ed, &batch)?;
+    let arc = naming::batch_dir(&d.arc, &batch)?;
+    let vid = naming::batch_dir(&d.vid, &batch)?;
+
+    Ok(BatchView {
+        batch,
+        raw: dir_view(&raw),
+        jpg: dir_view(&jpg),
+        ed: dir_view(&ed),
+        arc: dir_view(&arc),
+        vid: dir_view(&vid),
+    })
 }
 
 #[derive(Deserialize)]

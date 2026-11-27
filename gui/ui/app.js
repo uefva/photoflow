@@ -205,6 +205,7 @@ async function refreshBatches() {
   const root = $("root").value.trim();
   if (!root) {
     $("batch-list").innerHTML = "";
+    renderPreviewBatches([]);
     return;
   }
   try {
@@ -212,8 +213,10 @@ async function refreshBatches() {
     $("batch-list").innerHTML = names
       .map((n) => `<option value="${n.replace(/"/g, "&quot;")}"></option>`)
       .join("");
+    renderPreviewBatches(names);
   } catch (e) {
     status("读批次失败：" + e);
+    renderPreviewBatches([]);
   }
 }
 
@@ -285,6 +288,193 @@ async function openConfigDir() {
   }
 }
 
+// ---------------------------------------------------------------- 批次预览
+
+const PREVIEW = { batch: "", view: null, filter: "all" };
+
+const PREVIEW_DIRS = [
+  { key: "raw", label: "RAW 目录", short: "RAW" },
+  { key: "jpg", label: "原图目录", short: "原图" },
+  { key: "ed", label: "成品目录", short: "成品" },
+  { key: "arc", label: "归档目录", short: "归档" },
+  { key: "vid", label: "视频目录", short: "视频" },
+];
+
+/// 每个目录最多渲染多少行。后端已经按 2000 条截断，这里再收一道，
+/// 免得一个几千张的批次往 DOM 里塞几万个节点把界面拖住。
+const PREVIEW_RENDER_MAX = 500;
+
+function fmtSize(n) {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return (i === 0 ? v : v.toFixed(v >= 10 ? 0 : 1)) + " " + units[i];
+}
+
+function dirOfPath(p) {
+  const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  return i > 0 ? p.slice(0, i) : p;
+}
+
+function renderPreviewBatches(names) {
+  const box = $("preview-batches");
+  box.innerHTML = "";
+  if (!names.length) {
+    const d = document.createElement("div");
+    d.className = "preview-empty";
+    d.textContent = $("root").value.trim() ? "（这个库里还没有批次）" : "（先填照片库根目录）";
+    box.appendChild(d);
+    return;
+  }
+  for (const n of names) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "preview-batch" + (n === PREVIEW.batch ? " active" : "");
+    b.textContent = n;
+    b.title = n;
+    b.addEventListener("click", () => loadPreview(n));
+    box.appendChild(b);
+  }
+}
+
+function clearPreview() {
+  PREVIEW.batch = "";
+  PREVIEW.view = null;
+  PREVIEW.filter = "all";
+  $("preview-title").textContent = "还没选批次";
+  $("preview-filter").innerHTML = "";
+  const list = $("preview-list");
+  list.innerHTML = "";
+  const d = document.createElement("div");
+  d.className = "preview-empty";
+  d.textContent = "在左边选一个批次。";
+  list.appendChild(d);
+}
+
+async function loadPreview(name) {
+  const root = $("root").value.trim();
+  if (!root) {
+    status("先填照片库根目录");
+    return;
+  }
+  PREVIEW.batch = name;
+  document
+    .querySelectorAll(".preview-batch")
+    .forEach((b) => b.classList.toggle("active", b.textContent === name));
+  $("preview-title").textContent = name + " · 读取中…";
+  try {
+    PREVIEW.view = await invoke("list_batch", { root, batch: name });
+    PREVIEW.filter = "all";
+    renderPreview();
+  } catch (e) {
+    PREVIEW.view = null;
+    $("preview-title").textContent = name;
+    $("preview-filter").innerHTML = "";
+    const list = $("preview-list");
+    list.innerHTML = "";
+    const d = document.createElement("div");
+    d.className = "preview-empty";
+    d.textContent = "读取失败：" + e;
+    list.appendChild(d);
+  }
+}
+
+function appendFileRow(list, tag, f) {
+  const row = document.createElement("div");
+  row.className = "file-row";
+  row.title = f.path + "\n双击在资源管理器中打开所在目录";
+
+  const t = document.createElement("span");
+  t.className = "file-tag";
+  t.textContent = f.kind === "video" ? "视频" : tag;
+
+  const nm = document.createElement("span");
+  nm.className = "file-name";
+  nm.textContent = f.name;
+
+  const meta = document.createElement("span");
+  meta.className = "file-meta";
+  meta.textContent = fmtSize(f.size) + (f.date ? " · " + f.date : "");
+
+  row.append(t, nm, meta);
+  row.addEventListener("dblclick", async () => {
+    try {
+      await invoke("open_path", { path: dirOfPath(f.path) });
+    } catch (e) {
+      status("打不开：" + e);
+    }
+  });
+  list.appendChild(row);
+}
+
+function renderPreview() {
+  const v = PREVIEW.view;
+  const chips = $("preview-filter");
+  const list = $("preview-list");
+  chips.innerHTML = "";
+  list.innerHTML = "";
+  if (!v) return;
+
+  const counts = {};
+  let all = 0;
+  for (const d of PREVIEW_DIRS) {
+    counts[d.key] = v[d.key].total;
+    all += v[d.key].total;
+  }
+
+  const addChip = (key, label) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip" + (PREVIEW.filter === key ? " active" : "");
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      PREVIEW.filter = key;
+      renderPreview();
+    });
+    chips.appendChild(b);
+  };
+  addChip("all", "全部 " + all);
+  for (const d of PREVIEW_DIRS) addChip(d.key, d.short + " " + counts[d.key]);
+
+  $("preview-title").textContent = v.batch;
+
+  for (const d of PREVIEW_DIRS) {
+    if (PREVIEW.filter !== "all" && PREVIEW.filter !== d.key) continue;
+    const dv = v[d.key];
+
+    const head = document.createElement("div");
+    head.className = "preview-group";
+    const b = document.createElement("b");
+    b.textContent = d.label;
+    const n = document.createElement("span");
+    n.textContent = dv.total ? dv.total + " 个文件" : "（空）";
+    head.append(b, n);
+    if (dv.truncated) {
+      const cut = document.createElement("span");
+      cut.className = "cut";
+      cut.textContent = "仅显示前 " + dv.files.length + " 个，共 " + dv.total + " 个";
+      head.appendChild(cut);
+    }
+    list.appendChild(head);
+
+    if (!dv.files.length) continue;
+    const rows = dv.files.slice(0, PREVIEW_RENDER_MAX);
+    for (const f of rows) appendFileRow(list, d.short, f);
+    if (dv.files.length > rows.length) {
+      const more = document.createElement("div");
+      more.className = "preview-empty";
+      more.textContent =
+        "只渲染前 " + rows.length + " 行，共 " + dv.total + " 个；可以先清理目录或看别的目录。";
+      list.appendChild(more);
+    }
+  }
+}
+
 // ---------------------------------------------------------------- 启动
 
 async function boot() {
@@ -321,6 +511,7 @@ async function boot() {
   // 顶部输入
   $("root").addEventListener("input", () => {
     onInputsChanged();
+    clearPreview();
     clearTimeout(batchTimer);
     batchTimer = setTimeout(refreshBatches, 500);
   });
@@ -329,6 +520,7 @@ async function boot() {
   $("dedupe").addEventListener("change", onInputsChanged);
   $("verify").addEventListener("change", onInputsChanged);
   $("refresh-batches").addEventListener("click", refreshBatches);
+  $("preview-refresh").addEventListener("click", refreshBatches);
 
   // 浏览 / 打开
   $("pick-root").addEventListener("click", async () => {
@@ -382,6 +574,10 @@ async function boot() {
   updateBatchLabels();
   updateRootHint();
   await refreshBatches();
+  const b0 = $("batch").value.trim();
+  if (b0 && $("root").value.trim()) {
+    await loadPreview(b0);
+  }
   status("就绪");
 }
 

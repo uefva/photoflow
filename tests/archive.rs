@@ -396,3 +396,42 @@ fn archive_does_not_treat_video_as_missing_original() {
     assert!(out.contains("找不到"), "{out}");
     assert!(!out.contains("将移动"), "视频不能被列进移动清单：{out}");
 }
+
+#[test]
+fn archive_reports_video_count_without_moving() {
+    let lib = Lib::new("vid-count");
+    lib.write(DIR_JPG, "IMG_0001.JPG", b"PHOTO");
+    lib.write(DIR_ED, "IMG_0001-ed.jpg", b"EDITED");
+    let v = lib.write(DIR_VID, "A.MP4", b"VIDEO");
+
+    let (code, out) = lib.run(&["archive", lib.batch()]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("视频目录保留"), "{out}");
+    assert!(v.exists(), "视频必须留在原地：{out}");
+    assert!(lib.arc_list().is_empty(), "{out}");
+}
+
+#[test]
+fn doctor_checks_video_batches_and_duplicates() {
+    let lib = Lib::new("vid-doc");
+    lib.write(DIR_JPG, "IMG_0001.JPG", b"PHOTO");
+
+    // 只有视频、没有照片批次的目录
+    let orphan = lib.root.join(DIR_VID).join("2026-11-01-孤儿");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("B.MP4"), b"VIDEO").unwrap();
+    fs::write(orphan.join("B-副本.MP4"), b"VIDEO").unwrap();
+    // 空视频批次目录
+    fs::create_dir_all(lib.root.join(DIR_VID).join("2026-11-02-空")).unwrap();
+
+    let (code, out) = lib.run(&["doctor"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("视频=2"), "两个视频批次要算进统计：{out}");
+    assert!(out.contains("没有同名批次"), "孤儿视频批次要报：{out}");
+    assert!(out.contains("视频批次目录是空的"), "空视频目录要报：{out}");
+    assert!(
+        out.contains("视频目录里内容相同的重复文件"),
+        "同大小同内容要报重复：{out}"
+    );
+    assert!(out.contains("同一内容 2 份"), "{out}");
+}

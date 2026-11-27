@@ -22,6 +22,7 @@ fn main() {
             commands::get_state,
             commands::save_settings,
             commands::list_batches,
+            commands::list_batch,
             commands::run_command,
             commands::pick_directory,
             commands::open_path,
