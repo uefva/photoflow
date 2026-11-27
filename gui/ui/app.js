@@ -249,6 +249,7 @@ async function saveSettings() {
     jpg: $("dir-jpg").value.trim(),
     ed: $("dir-ed").value.trim(),
     arc: $("dir-arc").value.trim(),
+    vid: $("dir-vid").value.trim(),
   };
   try {
     await invoke("save_settings", {
@@ -270,6 +271,7 @@ function resetDirs() {
   $("dir-jpg").value = S.defaultDirs.jpg || "05_JPG图";
   $("dir-ed").value = S.defaultDirs.ed || "03_缓存-调色ed";
   $("dir-arc").value = S.defaultDirs.arc || "99_图库/原图JPG归档";
+  $("dir-vid").value = S.defaultDirs.vid || "02-视频";
   settingsHint("已恢复默认值，点「保存」才会生效。", "");
 }
 
@@ -374,6 +376,7 @@ async function boot() {
   $("dir-jpg").value = st.dirs.jpg || "";
   $("dir-ed").value = st.dirs.ed || "";
   $("dir-arc").value = st.dirs.arc || "";
+  $("dir-vid").value = st.dirs.vid || "";
   $("config-path").textContent = "配置文件：" + st.config_path;
 
   updateBatchLabels();

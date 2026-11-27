@@ -16,6 +16,7 @@ pub const DEFAULT_RAW: &str = "04_RAW原图";
 pub const DEFAULT_JPG: &str = "05_JPG图";
 pub const DEFAULT_ED: &str = "03_缓存-调色ed";
 pub const DEFAULT_ARC: &str = "99_图库/原图JPG归档";
+pub const DEFAULT_VID: &str = "02-视频";
 
 /// 相机 RAW 扩展名（不含点）。
 pub const RAW_EXT: &[&str] = &[
@@ -25,6 +26,12 @@ pub const RAW_EXT: &[&str] = &[
 
 /// 会被当成「原图」的扩展名（不含点）。
 pub const JPG_EXT: &[&str] = &["jpg", "jpeg", "jpe", "png", "heic", "heif", "tif", "tiff"];
+
+/// 视频扩展名（不含点）。分发时进视频目录，永不参与照片的成品/原图匹配。
+pub const VIDEO_EXT: &[&str] = &[
+    "mp4", "mov", "m4v", "avi", "mkv", "wmv", "flv", "webm", "mts", "m2ts", "3gp", "mpg", "mpeg",
+    "insv", "lrv",
+];
 
 /// 遍历时跳过的系统目录（小写比较）。
 const SKIP_DIR_NAMES: &[&str] = &[
@@ -43,11 +50,12 @@ pub fn area_name(key: &str) -> &'static str {
         "jpg" => "原图目录",
         "ed" => "成品目录",
         "arc" => "归档目录",
+        "vid" => "视频目录",
         _ => "目录",
     }
 }
 
-pub const AREA_KEYS: [&str; 4] = ["raw", "jpg", "ed", "arc"];
+pub const AREA_KEYS: [&str; 5] = ["raw", "jpg", "ed", "arc", "vid"];
 
 #[derive(Debug, Clone)]
 pub struct Dirs {
@@ -55,16 +63,18 @@ pub struct Dirs {
     pub jpg: PathBuf,
     pub ed: PathBuf,
     pub arc: PathBuf,
+    pub vid: PathBuf,
     pub logs: PathBuf,
 }
 
-/// 四个业务目录（名字按当前配置）。
+/// 五个业务目录（名字按当前配置）。
 pub fn dirs(root: &Path) -> Dirs {
     let arc = join_rel(root, &config::dir_name("arc"));
     Dirs {
         raw: join_rel(root, &config::dir_name("raw")),
         jpg: join_rel(root, &config::dir_name("jpg")),
         ed: join_rel(root, &config::dir_name("ed")),
+        vid: join_rel(root, &config::dir_name("vid")),
         logs: arc.join("_logs"),
         arc,
     }
@@ -115,6 +125,15 @@ pub fn is_raw_ext(ext: &str) -> bool {
 
 pub fn is_jpg_ext(ext: &str) -> bool {
     JPG_EXT.contains(&ext)
+}
+
+pub fn is_video_ext(ext: &str) -> bool {
+    VIDEO_EXT.contains(&ext)
+}
+
+/// 是不是「照片类」文件（RAW 或 JPG 家族）。归档/体检只把这个范围当原图候选。
+pub fn is_photo_ext(ext: &str) -> bool {
+    is_raw_ext(ext) || is_jpg_ext(ext)
 }
 
 /// 批次名的**日期格式**校验。返回 Err(提示) 表示不合规。

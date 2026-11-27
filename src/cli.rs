@@ -39,12 +39,13 @@ fn usage() -> String {
          --expect-plan X   带上预演时的清单指纹，执行前核对\n\
          \n\
          会改动文件的命令默认只预演。\n\
-         当前目录设置：RAW={} 原图={} 成品={} 归档={}\n",
+         当前目录设置：RAW={} 原图={} 成品={} 归档={} 视频={}\n",
         env!("CARGO_PKG_VERSION"),
         config::dir_name("raw"),
         config::dir_name("jpg"),
         config::dir_name("ed"),
         config::dir_name("arc"),
+        config::dir_name("vid"),
     )
 }
 

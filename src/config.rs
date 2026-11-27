@@ -11,7 +11,9 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use crate::naming::{area_name, AREA_KEYS, DEFAULT_ARC, DEFAULT_ED, DEFAULT_JPG, DEFAULT_RAW};
+use crate::naming::{
+    area_name, AREA_KEYS, DEFAULT_ARC, DEFAULT_ED, DEFAULT_JPG, DEFAULT_RAW, DEFAULT_VID,
+};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -27,6 +29,7 @@ impl Default for Config {
         dirs.insert("jpg".to_string(), DEFAULT_JPG.to_string());
         dirs.insert("ed".to_string(), DEFAULT_ED.to_string());
         dirs.insert("arc".to_string(), DEFAULT_ARC.to_string());
+        dirs.insert("vid".to_string(), DEFAULT_VID.to_string());
         Config {
             root: None,
             batch: String::new(),
@@ -152,7 +155,7 @@ pub fn dirs_conflict_in(dirs: &BTreeMap<String, String>) -> Option<String> {
         let norm = norm_dir(&raw);
         if let Some(prev) = seen.get(&norm) {
             return Some(format!(
-                "四个目录不能指向同一个位置：{} 和 {} 都是「{}」。\n\
+                "这些目录不能指向同一个位置：{} 和 {} 都是「{}」。\n\
                  这样归档会把原图目录当成归档目录，把原图自己当重复份删掉。\n\
                  改 {}（或界面「设置」页）把这两个目录分开，再重新运行。",
                 area_name(prev),

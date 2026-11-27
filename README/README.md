@@ -28,7 +28,7 @@ cargo tauri build
 以下命令都在 `rust/` 目录下执行：
 
 ```
-cargo test              # 44 个用例：29 单元 + 15 集成
+cargo test              # 47 个用例：29 单元 + 18 集成
 cargo build --release   # 产物 target/release/photoflow(.exe)
 
 photoflow new     2026-11-26-梧桐山 --apply
@@ -41,6 +41,8 @@ photoflow doctor
 通用参数：`--root PATH`、`--apply`、`--progress`、`--expect-plan X`；
 `ingest` 另有 `--dedupe` / `--verify`，`new` 另有 `--force`。
 
+视频（MP4 / MOV 等）分发到视频目录（默认 `02-视频`），永不参与成品/原图匹配。
+
 根目录的取值顺序：`--root` → 配置文件里的 `root` → 环境变量 `PHOTOFLOW_ROOT` →
 内置默认值。配置文件位置 `%USERPROFILE%\.photoflow.json`，可用 `PHOTOFLOW_CONFIG` 指走。
 
@@ -49,9 +51,9 @@ photoflow doctor
 两层，都必须在你的机器上跑一遍：
 
 1. **Rust 自己的**：`cargo test` —— 29 单元（命名/后缀/指纹/哈希/复制移动/config JSON）
-   + 15 集成（合成照片库跑真实二进制：侧车闸门、多版本只归档一次、降噪中缀、
+   + 18 集成（合成照片库跑真实二进制：侧车闸门、多版本只归档一次、降噪中缀、
    冲突不覆盖、重复份清理、多格式歧义、单候选跨格式、指纹锁清单、路径穿越、
-   分发改名不顶名、不留临时文件、目录撞车拒绝执行）。
+   分发改名不顶名、不留临时文件、目录撞车拒绝执行、视频分流与归档忽略）。
 2. **Python 那套 24 条**：`python/test/test_photoflow.py`，跑的是 Python 版主程序。
    它没有 `PHOTOFLOW_BIN` 这类开关，不能指向 Rust 二进制；改了一边最好把
    `cargo test` 和这套都跑一遍（见根目录 README「跑测试」）。
@@ -86,7 +88,7 @@ Windows 上直接调不带 `COPY_ALLOWED`/`REPLACE_EXISTING` 的 `MoveFileExW`�
 
 ## 验证情况
 
-- `cargo test`：44 条（29 单元 + 15 集成）全绿。
+- `cargo test`：47 条（29 单元 + 18 集成）全绿。
 - Windows 实机：CLI 和 Tauri 界面都已编译并实际使用过。期间发现并修掉两个问题——
   `--verify` 的哈希读缓冲（1 MiB 栈数组）撑爆主线程栈；界面里的确认框因为是
   async 版本而没拦住执行。

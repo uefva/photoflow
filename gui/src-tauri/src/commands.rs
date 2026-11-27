@@ -47,6 +47,7 @@ pub fn get_state() -> UiState {
         ("jpg", naming::DEFAULT_JPG),
         ("ed", naming::DEFAULT_ED),
         ("arc", naming::DEFAULT_ARC),
+        ("vid", naming::DEFAULT_VID),
     ] {
         default_dirs.insert(key.to_string(), value.to_string());
     }

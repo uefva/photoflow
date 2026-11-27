@@ -53,7 +53,7 @@
   <!-- 从卡分发 -->
   <section class="panel" id="panel-ingest">
     <h2>从卡里分发</h2>
-    <p class="desc">相机 RAW 进 RAW 目录，JPG / HEIC / PNG / TIFF 进原图目录，视频等其余文件跳过。
+    <p class="desc">相机 RAW 进 RAW 目录，JPG / HEIC / PNG / TIFF 进原图目录，视频进视频目录，其余文件跳过。
       同名文件先比大小、再比 SHA-256，内容相同才算重复。</p>
     <div class="field">
       <label for="src">源目录</label>
@@ -89,7 +89,7 @@
   <!-- 体检 -->
   <section class="panel" id="panel-doctor">
     <h2>全库体检</h2>
-    <p class="desc">只读，不改任何文件。检查批次命名、四个目录是否对齐、成品目录里散落的文件、
+    <p class="desc">只读，不改任何文件。检查批次命名、各目录是否对齐、成品目录里散落的文件、
       原图目录里的空目录，以及最关键的「已修但原图还没归档」。</p>
     <pre class="console" id="out-doctor">点「运行」开始体检。</pre>
     <div class="actions">
@@ -101,13 +101,14 @@
   <!-- 设置 -->
   <section class="panel" id="panel-settings">
     <h2>目录设置</h2>
-    <p class="desc">这里改的是脚本去认哪四个文件夹，不会重命名或移动已有的文件夹。
+    <p class="desc">这里改的是脚本去认哪几个文件夹，不会重命名或移动已有的文件夹。
       改完必须保证照片库里确实叫这些名字，否则所有命令都会找不到目录。</p>
     <div class="settings-grid">
       <label for="dir-raw">RAW 目录</label><input id="dir-raw" class="mono" spellcheck="false">
       <label for="dir-jpg">原图目录</label><input id="dir-jpg" class="mono" spellcheck="false">
       <label for="dir-ed">成品目录</label><input id="dir-ed" class="mono" spellcheck="false">
       <label for="dir-arc">归档目录</label><input id="dir-arc" class="mono" spellcheck="false">
+      <label for="dir-vid">视频目录</label><input id="dir-vid" class="mono" spellcheck="false">
     </div>
     <p class="hint-line" id="settings-hint"></p>
     <div class="actions split">

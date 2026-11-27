@@ -15,6 +15,7 @@ const DIR_RAW: &str = "04_RAW原图";
 const DIR_JPG: &str = "05_JPG图";
 const DIR_ED: &str = "03_缓存-调色ed";
 const DIR_ARC: &str = "99_图库/原图JPG归档";
+const DIR_VID: &str = "02-视频";
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_photoflow")
@@ -345,4 +346,53 @@ fn ingest_also_refuses_duplicate_dirs() {
     let (code, out) = lib.run(&["ingest", card.to_str().unwrap(), lib.batch(), "--apply"]);
     assert_eq!(code, 2, "{out}");
     assert!(out.contains("同一个位置"), "{out}");
+}
+
+// ---------------------------------------------------------------- 视频
+
+#[test]
+fn ingest_routes_videos_to_video_dir() {
+    // 视频进视频目录，不留在照片目录里；统计里单列
+    let lib = Lib::new("vid-ingest");
+    let card = lib.root.join("card");
+    fs::create_dir_all(&card).unwrap();
+    fs::write(card.join("IMG_0001.JPG"), vec![b'P'; 100]).unwrap();
+    fs::write(card.join("IMG_0001.MP4"), vec![b'V'; 200]).unwrap();
+    fs::write(card.join("CLIP0002.MOV"), vec![b'C'; 300]).unwrap();
+    fs::write(card.join("notes.txt"), b"x").unwrap();
+
+    let (code, out) = lib.run(&["ingest", card.to_str().unwrap(), lib.batch(), "--apply"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(lib.list(DIR_JPG), vec!["IMG_0001.JPG"], "{out}");
+    let vids = list_names(&lib.root.join(DIR_VID).join(lib.batch()));
+    assert_eq!(vids, vec!["CLIP0002.MOV", "IMG_0001.MP4"], "{out}");
+    assert!(out.contains("视频 2 个"), "{out}");
+}
+
+#[test]
+fn archive_ignores_video_among_originals() {
+    // 05 里同主名还有一段视频：不能被当成「另一种格式的原图」，也不能被移动
+    let lib = Lib::new("vid-arc");
+    lib.write(DIR_JPG, "IMG_0001.JPG", b"PHOTO");
+    let vid = lib.write(DIR_JPG, "IMG_0001.MP4", b"VIDEO");
+    lib.write(DIR_ED, "IMG_0001-ed.jpg", b"EDITED");
+
+    let (code, out) = lib.run(&["archive", lib.batch(), "--apply"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(lib.arc_list(), vec!["IMG_0001.JPG"], "{out}");
+    assert!(vid.exists(), "视频不能被搬走：{out}");
+    assert!(!out.contains("其它格式的原图"), "视频不该被当成另一种格式：{out}");
+}
+
+#[test]
+fn archive_does_not_treat_video_as_missing_original() {
+    // 05 里只有视频、成品却存在：应报「找不到原图」，绝不能把视频当原图归档
+    let lib = Lib::new("vid-only");
+    lib.write(DIR_JPG, "IMG_0001.MP4", b"VIDEO");
+    lib.write(DIR_ED, "IMG_0001-ed.jpg", b"EDITED");
+
+    let (code, out) = lib.run(&["archive", lib.batch()]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("找不到"), "{out}");
+    assert!(!out.contains("将移动"), "视频不能被列进移动清单：{out}");
 }

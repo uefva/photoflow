@@ -113,10 +113,14 @@ fn build_plan(root: &Path, batch: &str) -> Result<ArchivePlan, String> {
         ));
     }
 
-    // 原图索引：主名 -> 扩展名 -> [文件]
+    // 原图索引：主名 -> 扩展名 -> [文件]。
+    // 只收照片类文件：视频既不是成品也不是原图，混进来会被当成「另一种格式的原图」搬走。
     let mut index: HashMap<String, HashMap<String, Vec<PathBuf>>> = HashMap::new();
     if jpg_dir.is_dir() {
         for f in iter_files(&jpg_dir) {
+            if !naming::is_photo_ext(&ext_lower(&f)) {
+                continue;
+            }
             index
                 .entry(stem_lower(&f))
                 .or_default()
@@ -279,10 +283,11 @@ fn build_plan(root: &Path, batch: &str) -> Result<ArchivePlan, String> {
         });
     }
 
-    // 原图目录里没被任何成品指向的
+    // 原图目录里没被任何成品指向的（只数照片；视频不属于照片流程）
     if jpg_dir.is_dir() {
         p.untouched = iter_files(&jpg_dir)
             .into_iter()
+            .filter(|f| naming::is_photo_ext(&ext_lower(f)))
             .filter(|f| !referenced.contains(f))
             .count();
     }

@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::fsops::{copy_verified, same_content};
 use crate::naming::{
-    self, batch_dir, check_batch_name, ext_lower, human, is_jpg_ext, is_raw_ext, name_raw,
+    self, batch_dir, check_batch_name, ext_lower, human, is_jpg_ext, is_raw_ext, is_video_ext,
+    name_raw,
 };
 use crate::{plan, progress, ui};
 
@@ -26,6 +27,7 @@ pub struct Placed {
 struct IngestPlan {
     raw: Vec<Placed>,
     jpg: Vec<Placed>,
+    vid: Vec<Placed>,
     other: Vec<PathBuf>,
     skip: Vec<PathBuf>,
     conflict: Vec<(PathBuf, PathBuf, String)>,
@@ -121,6 +123,7 @@ pub fn run(
 
     let dst_raw = batch_dir(&d.raw, batch)?;
     let dst_jpg = batch_dir(&d.jpg, batch)?;
+    let dst_vid = batch_dir(&d.vid, batch)?;
 
     let files = naming::iter_files(src);
 
@@ -133,6 +136,8 @@ pub fn run(
             reserved.insert(key("raw", &name_raw(f)));
         } else if is_jpg_ext(&ext) {
             reserved.insert(key("jpg", &name_raw(f)));
+        } else if is_video_ext(&ext) {
+            reserved.insert(key("vid", &name_raw(f)));
         }
     }
 
@@ -150,6 +155,8 @@ pub fn run(
             ("raw", &dst_raw)
         } else if is_jpg_ext(&ext) {
             ("jpg", &dst_jpg)
+        } else if is_video_ext(&ext) {
+            ("vid", &dst_vid)
         } else {
             p.other.push(f.clone());
             continue;
@@ -214,10 +221,10 @@ pub fn run(
             .entry(k)
             .or_default()
             .push((f.clone(), target.clone()));
-        if kind == "raw" {
-            p.raw.push(Placed { src: f.clone(), dst: target });
-        } else {
-            p.jpg.push(Placed { src: f.clone(), dst: target });
+        match kind {
+            "raw" => p.raw.push(Placed { src: f.clone(), dst: target }),
+            "jpg" => p.jpg.push(Placed { src: f.clone(), dst: target }),
+            _ => p.vid.push(Placed { src: f.clone(), dst: target }),
         }
     }
 
@@ -245,29 +252,43 @@ pub fn run(
             jpg_keep.push(placed);
         }
     }
+    let mut vid_keep: Vec<Placed> = Vec::new();
+    for placed in std::mem::take(&mut p.vid) {
+        let k = key("vid", &name_raw(&placed.dst));
+        if let Some(first) = seen.get(&k) {
+            clashes.push((placed.src, placed.dst, first.clone()));
+        } else {
+            seen.insert(k, placed.src.clone());
+            vid_keep.push(placed);
+        }
+    }
     p.raw = raw_keep;
     p.jpg = jpg_keep;
+    p.vid = vid_keep;
     p.target_clash = clashes;
 
-    let total_bytes: u64 = p.raw.iter().chain(p.jpg.iter()).map(|x| file_size(&x.src)).sum();
+    let total_bytes: u64 = p
+        .raw
+        .iter()
+        .chain(p.jpg.iter())
+        .chain(p.vid.iter())
+        .map(|x| file_size(&x.src))
+        .sum();
 
     // 清单 = 真正要复制的那些 (类型, 源, 目标, 大小, 修改时间)
-    let rows: Vec<Vec<String>> = ["raw", "jpg"]
-        .iter()
-        .flat_map(|kind| {
-            let list = if *kind == "raw" { &p.raw } else { &p.jpg };
-            list.iter().map(move |x| {
-                let (size, mt) = plan::stat_sig(&x.src);
-                vec![
-                    kind.to_string(),
-                    x.src.display().to_string(),
-                    x.dst.display().to_string(),
-                    size.map(|v| v.to_string()).unwrap_or_default(),
-                    mt.map(|v| v.to_string()).unwrap_or_default(),
-                ]
-            })
-        })
-        .collect();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for (kind, list) in [("raw", &p.raw), ("jpg", &p.jpg), ("vid", &p.vid)] {
+        for x in list {
+            let (size, mt) = plan::stat_sig(&x.src);
+            rows.push(vec![
+                kind.to_string(),
+                x.src.display().to_string(),
+                x.dst.display().to_string(),
+                size.map(|v| v.to_string()).unwrap_or_default(),
+                mt.map(|v| v.to_string()).unwrap_or_default(),
+            ]);
+        }
+    }
     let token = plan::token(&rows);
     plan::check_plan(expect_plan, &token)?;
     progress::announce_plan(&token);
@@ -278,11 +299,14 @@ pub fn run(
     );
     println!("RAW  待复制 {:>4} 个", p.raw.len());
     println!("JPG  待复制 {:>4} 个", p.jpg.len());
+    if !p.vid.is_empty() {
+        println!("视频 待复制 {:>4} 个", p.vid.len());
+    }
     println!("已存在跳过 {:>4} 个", p.skip.len());
     println!("合计待复制 {}", human(total_bytes));
     if let Some(first) = p.other.first() {
         println!(
-            "{}非 RAW/JPG 跳过 {} 个（如 {}）",
+            "{}非照片/视频文件跳过 {} 个（如 {}）",
             ui::C_INFO,
             p.other.len(),
             name_raw(first)
@@ -353,13 +377,15 @@ pub fn run(
     let mut raced = 0usize;
     let mut copied_raw = 0usize;
     let mut copied_jpg = 0usize;
-    let plan_total = p.raw.len() + p.jpg.len();
+    let mut copied_vid = 0usize;
+    let plan_total = p.raw.len() + p.jpg.len() + p.vid.len();
     let mut done = 0usize;
 
     progress::progress(0, plan_total, "复制");
     for (kind, label, dst_dir, list) in [
         ("raw", "RAW", &dst_raw, &p.raw),
         ("jpg", "JPG", &dst_jpg, &p.jpg),
+        ("vid", "视频", &dst_vid, &p.vid),
     ] {
         std::fs::create_dir_all(dst_dir)
             .map_err(|e| format!("建目录失败 {}：{e}", dst_dir.display()))?;
@@ -378,10 +404,10 @@ pub fn run(
             }
             match copy_verified(&placed.src, &placed.dst, verify) {
                 Ok(()) => {
-                    if kind == "raw" {
-                        copied_raw += 1;
-                    } else {
-                        copied_jpg += 1;
+                    match kind {
+                        "raw" => copied_raw += 1,
+                        "jpg" => copied_jpg += 1,
+                        _ => copied_vid += 1,
                     }
                     if (i + 1) % 50 == 0 {
                         println!("       {} {}/{} ...", label, i + 1, list.len());
@@ -396,7 +422,9 @@ pub fn run(
         }
     }
 
-    println!("\n完成：RAW {copied_raw} 个，JPG {copied_jpg} 个，失败 {errors} 个。");
+    println!(
+        "\n完成：RAW {copied_raw} 个，JPG {copied_jpg} 个，视频 {copied_vid} 个，失败 {errors} 个。"
+    );
     if raced > 0 {
         println!("（另有 {raced} 个的目标位置在执行期间被别的程序占了，已跳过，未覆盖）");
     }
