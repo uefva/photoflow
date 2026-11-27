@@ -170,7 +170,13 @@ async function start(name, apply) {
         status("预演完成 —— 看清清单后点「执行」");
       } else {
         invalidate(name);
-        status(res.code === 0 ? "预演完成，但没有拿到清单指纹，请重试" : `预演结束，退出码 ${res.code}`);
+        status(
+          res.code === 0
+            ? "预演完成，但没有拿到清单指纹，请重试"
+            : res.code === 1
+              ? "预演结束，有失败项，请看控制台"
+              : `预演结束，退出码 ${res.code}`
+        );
       }
     } else if (name === "doctor") {
       setBar(name, 100);
@@ -178,7 +184,13 @@ async function start(name, apply) {
     } else {
       // 执行过一次之后，指纹就作废了，要重新预演
       invalidate(name);
-      status(res.code === 0 ? "完成" : `结束，退出码 ${res.code}`);
+      status(
+        res.code === 0
+          ? "完成"
+          : res.code === 1
+            ? "完成，但有失败项，请看控制台"
+            : `结束，退出码 ${res.code}`
+      );
     }
   } catch (e) {
     appendLine(name, "启动失败：" + e);

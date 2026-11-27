@@ -16,6 +16,7 @@ use crate::naming::{
     self, batch_dir, check_batch_name, ext_lower, human, is_jpg_ext, is_raw_ext, is_video_ext,
     name_raw,
 };
+use crate::cli::Failure;
 use crate::{plan, progress, ui};
 
 pub struct Placed {
@@ -111,7 +112,24 @@ pub fn run(
     dedupe: bool,
     verify: bool,
     expect_plan: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
+    match run_inner(root, src, batch, apply, dedupe, verify, expect_plan) {
+        Ok(0) => Ok(()),
+        // 有单项复制失败：不是「全成功」，退出码 1，脚本和界面都要能看出来
+        Ok(_) => Err(Failure::Partial),
+        Err(e) => Err(Failure::Fatal(e)),
+    }
+}
+
+fn run_inner(
+    root: &Path,
+    src: &Path,
+    batch: &str,
+    apply: bool,
+    dedupe: bool,
+    verify: bool,
+    expect_plan: Option<&str>,
+) -> Result<usize, String> {
     if !src.is_dir() {
         return Err(format!("源目录不存在：{}", src.display()));
     }
@@ -370,7 +388,7 @@ pub fn run(
 
     if !apply {
         println!("\n加 --apply 真正复制。想锁定这份清单，就加 --expect-plan {token}");
-        return Ok(());
+        return Ok(0);
     }
 
     let mut errors = 0usize;
@@ -431,5 +449,5 @@ pub fn run(
     if errors > 0 {
         println!("失败项未复制，请检查网络连接后重跑（已复制的会自动跳过）。");
     }
-    Ok(())
+    Ok(errors)
 }

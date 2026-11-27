@@ -435,3 +435,140 @@ fn doctor_checks_video_batches_and_duplicates() {
     );
     assert!(out.contains("同一内容 2 份"), "{out}");
 }
+
+fn set_read_only(p: &Path, ro: bool) {
+    let mut perm = fs::metadata(p).unwrap().permissions();
+    perm.set_readonly(ro);
+    fs::set_permissions(p, perm).unwrap();
+}
+
+#[test]
+fn read_only_source_copies_and_destination_stays_writable() {
+    let lib = Lib::new("ro-src");
+    let card = lib.root.join("_card");
+    fs::create_dir_all(&card).unwrap();
+    let src = card.join("IMG_9.JPG");
+    fs::write(&src, b"PHOTO").unwrap();
+    set_read_only(&src, true);
+
+    let (code, out) = lib.run(&["ingest", card.to_str().unwrap(), lib.batch(), "--apply"]);
+    assert_eq!(code, 0, "{out}");
+    let dest = lib.root.join(DIR_JPG).join(lib.batch()).join("IMG_9.JPG");
+    assert!(dest.is_file(), "{out}");
+    assert!(
+        !fs::metadata(&dest).unwrap().permissions().readonly(),
+        "目标文件应可写，否则以后归档移动会失败：{out}"
+    );
+    let tmp: Vec<String> = fs::read_dir(dest.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".phototmp"))
+        .collect();
+    assert!(tmp.is_empty(), "不能留下临时文件：{tmp:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn ingest_exit_code_is_one_when_a_copy_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let lib = Lib::new("exit-ingest");
+    let card = lib.root.join("_card");
+    fs::create_dir_all(&card).unwrap();
+    let src = card.join("IMG_1.JPG");
+    fs::write(&src, b"PHOTO").unwrap();
+    fs::set_permissions(&src, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let (code, out) = lib.run(&["ingest", card.to_str().unwrap(), lib.batch(), "--apply"]);
+    assert_eq!(code, 1, "有失败项时不能退出 0：{out}");
+    assert!(out.contains("失败 1 个"), "{out}");
+    assert!(!lib.root.join(DIR_JPG).join(lib.batch()).join("IMG_1.JPG").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn archive_exit_code_is_one_when_a_move_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let lib = Lib::new("exit-archive");
+    lib.write(DIR_JPG, "DSC1.JPG", b"PHOTO");
+    lib.write(DIR_ED, "DSC1-ed.jpg", b"EDITED");
+    let arc_batch = lib.root.join(DIR_ARC).join(lib.batch());
+    fs::create_dir_all(&arc_batch).unwrap();
+    fs::set_permissions(&arc_batch, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (code, out) = lib.run(&["archive", lib.batch(), "--apply"]);
+    let _ = fs::set_permissions(&arc_batch, fs::Permissions::from_mode(0o755));
+    assert_eq!(code, 1, "有失败项时不能退出 0：{out}");
+    assert!(out.contains("失败 1 个"), "{out}");
+    assert!(lib.root.join(DIR_JPG).join(lib.batch()).join("DSC1.JPG").exists());
+}
+
+fn json_escape(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[test]
+fn config_with_utf8_bom_is_read() {
+    let lib = Lib::new("bom");
+    lib.write(DIR_JPG, "IMG_1.JPG", b"PHOTO");
+
+    let cfg = lib.root.join("bom.json");
+    let text = format!(
+        "\u{feff}{{\"root\": \"{}\", \"batch\": \"\", \"dirs\": {{}}}}",
+        json_escape(&lib.root)
+    );
+    fs::write(&cfg, text).unwrap();
+
+    // 故意不传 --root，让程序只能从配置里取
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("PHOTOFLOW_CONFIG", &cfg)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string()
+        + &String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("原图=1"), "BOM 配置应被读到：{text}");
+    assert!(!text.contains("找不到 RAW 目录"), "{text}");
+}
+
+#[test]
+fn broken_config_warns_instead_of_silently_ignoring() {
+    let lib = Lib::new("badcfg");
+    let cfg = lib.root.join("bad.json");
+    fs::write(&cfg, "{\"root\": ").unwrap();
+
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("PHOTOFLOW_CONFIG", &cfg)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("不是合法 JSON"), "要提示配置被忽略：{err}");
+}
+
+#[test]
+fn new_refuses_missing_root() {
+    let lib = Lib::new("new-root");
+    let missing = lib.root.join("typo");
+    let out = Command::new(bin())
+        .args(["new", lib.batch(), "--apply", "--root"])
+        .arg(&missing)
+        .env("PHOTOFLOW_CONFIG", &lib.config)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string()
+        + &String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{text}");
+    assert!(!missing.exists(), "不能在错误路径下建目录：{text}");
+}
+
+#[test]
+fn new_still_works_on_existing_root() {
+    let lib = Lib::new("new-ok");
+    let (code, out) = lib.run(&["new", lib.batch(), "--apply"]);
+    assert_eq!(code, 0, "{out}");
+    for dir in [DIR_RAW, DIR_JPG, DIR_ED, DIR_ARC] {
+        assert!(lib.root.join(dir).join(lib.batch()).is_dir(), "{dir}：{out}");
+    }
+}

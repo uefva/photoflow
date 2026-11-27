@@ -126,6 +126,14 @@ fn resolve_root(a: &Args) -> PathBuf {
     default_root()
 }
 
+/// 命令的两种失败：
+///   - Fatal：参数、配置或环境问题，整件事没跑成，退出码 2；
+///   - Partial：跑完了，但有单项失败（比如某张照片复制失败），退出码 1。
+pub enum Failure {
+    Fatal(String),
+    Partial,
+}
+
 /// 跑一次命令行。`argv` 是去掉程序名之后的参数。
 pub fn run(argv: Vec<String>) -> i32 {
     config::load();
@@ -150,7 +158,7 @@ pub fn run(argv: Vec<String>) -> i32 {
     progress::enable(args.progress);
     let root = resolve_root(&args);
 
-    let result = match args.cmd.as_str() {
+    let result: Result<(), Failure> = match args.cmd.as_str() {
         "new" => match args.positional.as_slice() {
             [batch] => newcmd::run(
                 &root,
@@ -158,8 +166,12 @@ pub fn run(argv: Vec<String>) -> i32 {
                 args.apply,
                 args.force,
                 args.expect_plan.as_deref(),
-            ),
-            _ => Err(format!("用法：photoflow new <批次> [--apply] [--force]\n\n{}", usage())),
+            )
+            .map_err(Failure::Fatal),
+            _ => Err(Failure::Fatal(format!(
+                "用法：photoflow new <批次> [--apply] [--force]\n\n{}",
+                usage()
+            ))),
         },
         "ingest" => match args.positional.as_slice() {
             [src, batch] => ingest::run(
@@ -171,23 +183,30 @@ pub fn run(argv: Vec<String>) -> i32 {
                 args.verify,
                 args.expect_plan.as_deref(),
             ),
-            _ => Err(format!(
+            _ => Err(Failure::Fatal(format!(
                 "用法：photoflow ingest <源目录> <批次> [--apply] [--dedupe] [--verify]\n\n{}",
                 usage()
-            )),
+            ))),
         },
         "archive" => match args.positional.as_slice() {
             [batch] => archive::run(&root, batch, args.apply, args.expect_plan.as_deref()),
-            _ => Err(format!("用法：photoflow archive <批次> [--apply]\n\n{}", usage())),
+            _ => Err(Failure::Fatal(format!(
+                "用法：photoflow archive <批次> [--apply]\n\n{}",
+                usage()
+            ))),
         },
-        "doctor" => doctor::run(&root),
-        "gui" => Err("这是命令行版。图形界面请用 photoflow-gui（Tauri 那支）。".to_string()),
-        other => Err(format!("未知命令：{other}\n\n{}", usage())),
+        "doctor" => doctor::run(&root).map_err(Failure::Fatal),
+        "gui" => Err(Failure::Fatal(
+            "这是命令行版。图形界面请用 photoflow-gui（Tauri 那支）。".to_string(),
+        )),
+        other => Err(Failure::Fatal(format!("未知命令：{other}\n\n{}", usage()))),
     };
 
     match result {
         Ok(()) => 0,
-        Err(msg) => {
+        // 部分失败：详细错误已经逐条打印过，这里不再重复
+        Err(Failure::Partial) => 1,
+        Err(Failure::Fatal(msg)) => {
             // 前后各空一行：和 Python 版 die() 的 f"\n{C_ERR}{msg}\n" 对齐
             eprintln!("\n{}{}\n", ui::C_ERR, msg);
             2

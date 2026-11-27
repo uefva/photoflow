@@ -54,8 +54,31 @@ pub fn hash_file(path: &Path) -> io::Result<[u8; 32]> {
     crate::sha256::hash_reader(f)
 }
 
+/// 去掉只读属性。Windows 上只读文件删不掉、也打不开写入句柄，
+/// 所以清理临时文件和补时间之前都要先过这一道。
+fn make_writable(path: &Path) -> io::Result<()> {
+    let md = fs::metadata(path)?;
+    let mut perm = md.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // 只补属主写位，保留原来的读/执行位，不把 0444 变成 0666
+        perm.set_mode(perm.mode() | 0o200);
+    }
+    #[cfg(windows)]
+    {
+        if !perm.readonly() {
+            return Ok(());
+        }
+        perm.set_readonly(false);
+    }
+    fs::set_permissions(path, perm)
+}
+
 fn drop_quietly(path: &Path) {
     // 清理路径不该反过来把主流程搞崩，删不掉就算了。
+    // 先去掉只读：Windows 上 remove_file 遇到只读文件会失败，留下 .phototmp。
+    let _ = make_writable(path);
     let _ = fs::remove_file(path);
 }
 
@@ -78,8 +101,16 @@ where
 {
     let tmp = sibling_tmp(dst);
 
+    // 上次失败可能留下只读的临时文件（旧版本在 Windows 上删不掉），
+    // 先清掉，否则 fs::copy 会一直写不进去。
+    drop_quietly(&tmp);
+
     let result = (|| -> io::Result<()> {
         copy(src, &tmp)?;
+        // fs::copy 会把源文件的权限位一起带过来：相机卡上「保护」的照片是 0444，
+        // 临时文件也就成了只读，后面补 mtime 需要写句柄，会直接 EACCES。
+        // 库里不需要只读属性，统一补上属主写位。
+        make_writable(&tmp)?;
         if fs::metadata(&tmp)?.len() != fs::metadata(src)?.len() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "大小校验不一致"));
         }

@@ -1,7 +1,8 @@
 //! 配置文件：`%USERPROFILE%\.photoflow.json`（可用 `PHOTOFLOW_CONFIG` 指到别处）。
 //!
-//! 存三样东西：根目录、当前批次、四个目录名。读不到、某一项不合法，就退回默认值，
-//! 不报错——这一点和原 Python 版一致，免得配置文件写坏一次就整个工具不能用。
+//! 存三样东西：根目录、当前批次、四个目录名。文件不存在、某一项不合法，就退回默认值，
+//! 不报错——免得配置文件写坏一次就整个工具不能用。
+//! 但「文件在、却读不懂」会打一行警告：静默忽略会让人以为配置生效了。
 //!
 //! 为了保持「零第三方依赖」，这里自带一个够用的 JSON 解析器：只认对象、字符串、
 //! 数字、布尔、null、数组，够读自己的配置文件，也够读手工编辑过的。
@@ -179,11 +180,27 @@ pub fn load() {
     let path = config_path();
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
-        Err(_) => return,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+        Err(e) => {
+            eprintln!(
+                "警告：配置文件读不出来，已忽略 {}：{e}",
+                path.display()
+            );
+            return;
+        }
     };
-    let parsed = match Json::parse(&text) {
+    // 手工编辑过的配置经常带 UTF-8 BOM（记事本另存为就会加），
+    // 不剥掉的话 JSON 解析从第一个字符就失败，整份配置静默失效。
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let parsed = match Json::parse(text) {
         Some(j) => j,
-        None => return,
+        None => {
+            eprintln!(
+                "警告：配置文件不是合法 JSON，已忽略 {}（会用默认值）",
+                path.display()
+            );
+            return;
+        }
     };
     let obj = match parsed {
         Json::Object(o) => o,

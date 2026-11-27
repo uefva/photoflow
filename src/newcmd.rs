@@ -24,6 +24,18 @@ pub fn run(
         }
     }
 
+    // 根目录必须已经存在：路径打错一个字符，new 会在别的盘上建出一整套空库，
+    // 而且不会报错。这里只要求根目录本身存在，不要求 RAW 等子目录已建好——
+    // 第一次建批次时子目录本来就还不存在。
+    if !root.is_dir() {
+        return Err(format!(
+            "照片库根目录不存在或不是目录：{}\n  \
+             路径打错一个字符就会在别处建出一整套空目录，所以先停下来。\n  \
+             请先创建这个目录，或检查 --root / 配置里的路径。",
+            root.display()
+        ));
+    }
+
     let d: Dirs = naming::dirs(root);
     let targets: Vec<(&str, PathBuf)> = vec![
         ("RAW", batch_dir(&d.raw, name)?),

@@ -18,6 +18,7 @@ use crate::fsops::{move_verified, same_content, MoveKind};
 use crate::naming::{
     self, batch_dir, ext_lower, human, iter_files, name_raw, stem_lower, stem_raw, strip_ed,
 };
+use crate::cli::Failure;
 use crate::{plan, progress, ui};
 
 /// 允许当作「成品」的扩展名。故意不含 xmp / aae / dop / on1 / acr / cos
@@ -325,7 +326,25 @@ fn file_size(p: &Path) -> u64 {
     std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
 }
 
-pub fn run(root: &Path, batch: &str, apply: bool, expect_plan: Option<&str>) -> Result<(), String> {
+pub fn run(
+    root: &Path,
+    batch: &str,
+    apply: bool,
+    expect_plan: Option<&str>,
+) -> Result<(), Failure> {
+    match run_inner(root, batch, apply, expect_plan) {
+        Ok(0) => Ok(()),
+        Ok(_) => Err(Failure::Partial),
+        Err(e) => Err(Failure::Fatal(e)),
+    }
+}
+
+fn run_inner(
+    root: &Path,
+    batch: &str,
+    apply: bool,
+    expect_plan: Option<&str>,
+) -> Result<usize, String> {
     let p = build_plan(root, batch)?;
     plan::check_plan(expect_plan, &p.token)?;
     progress::announce_plan(&p.token);
@@ -480,7 +499,7 @@ pub fn run(root: &Path, batch: &str, apply: bool, expect_plan: Option<&str>) -> 
             "\n加 --apply 真正移动。想锁定这份清单，就加 --expect-plan {}",
             p.token
         );
-        return Ok(());
+        return Ok(0);
     }
 
     std::fs::create_dir_all(&p.arc_dir)
@@ -591,7 +610,7 @@ pub fn run(root: &Path, batch: &str, apply: bool, expect_plan: Option<&str>) -> 
             p.untouched
         );
     }
-    Ok(())
+    Ok(errors)
 }
 
 #[cfg(test)]
