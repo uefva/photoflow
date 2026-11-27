@@ -6,15 +6,16 @@
 
 适用于 Windows + Lightroom Classic + 带相册功能的 NAS。
 
-仓库里有两个实现，功能对齐：
+仓库结构：
 
 ```
-python/   原版：单文件、无第三方依赖，带 tkinter 图形界面
-rust/     移植版：零依赖，CLI 与 Python 版逐条对齐，另有 Tauri 桌面界面（见 rust/README.md）
-README/   工作流说明、压测报告、评审报告
+src/       命令行实现（零第三方依赖）
+gui/       桌面界面（Tauri 2，系统 WebView2）
+tests/     集成测试（跑真实二进制）
+README/    工作流说明、开发说明、配图
 ```
 
-下面的命令示例以 Python 版为准；Rust 版的参数和输出与之一致。
+命令行和桌面界面是同一个二进制：界面只是把参数拼成命令行，用隐藏的 `__cli` 模式调用自己。
 
 ---
 
@@ -134,9 +135,8 @@ photoflow doctor
 ## 五、命令参考
 
 ```bash
-photoflow gui                           打开图形界面（双击 photoflow.bat 也行）
 photoflow new     <批次>                建 RAW / 原图 / 成品 / 归档四个目录
-photoflow ingest  <源目录> <批次>        按扩展名分发 RAW / JPG
+photoflow ingest  <源目录> <批次>        按扩展名分发 RAW / 原图 / 视频
 photoflow archive <批次>                已修照片的原图移进归档目录
 photoflow doctor                        全库体检（只读）
 
@@ -148,6 +148,8 @@ photoflow doctor                        全库体检（只读）
   --verify      ingest 专用：复制后逐个比 SHA-256（明显变慢，但能挡住
                 「大小一样、内容错了」的静默损坏）
 ```
+
+桌面界面直接运行 `photoflow-gui.exe`，不带参数就是开界面；命令行版不带参数则打印用法。
 
 **所有会改动文件的命令默认都是预演。**先打印「将要做什么」的完整清单，确认无误再加 `--apply`。设计上宁可多敲一次命令，也不接受一次不可逆的误操作。
 
@@ -186,31 +188,34 @@ Lightroom 的 AI 降噪会派生出 `原名-已增强-降噪.dng`（英文界面
 
 **统计不注水。**归档结果分四类报账：真正归档几个、已在归档中几个、内容冲突几个、失败几个。跳过的不计入成功。
 
-## 八、安装
+## 八、构建与安装
 
-### Python 版
+需要 Rust 工具链（Windows 上用 rustup 装的 MSVC 版即可）。项目零第三方依赖，构建时不联网。
 
-需要 Python 3.7+，Windows 自带 `py` 启动器即可。
+命令行：
 
-```
-python/photoflow.py            主程序，单文件，无第三方依赖
-python/photoflow.bat           命令行入口，转发给 py -3
-python/test/test_photoflow.py  回归测试，24 个用例
+```bash
+cargo build --release      # 产物 target/release/photoflow.exe
 ```
 
-把主程序和 bat 放在同一目录，加入 PATH，或在该目录下执行。照片库路径通过 `--root` 传入，也可以在界面「设置」里保存到配置文件 `%USERPROFILE%\.photoflow.json`。
+桌面界面（Tauri 2，用系统 WebView2，不打包浏览器内核）：
+
+```bash
+cd gui/src-tauri
+cargo build --release      # 产物 target/release/photoflow-gui.exe，前端资源已编进去
+```
+
+要安装包的话再装 tauri-cli（`cargo install tauri-cli --version "^2"`），然后在 `gui/` 下跑 `cargo tauri build`。
+
+把 exe 放到任意目录、加入 PATH，或用全路径调用。照片库路径通过 `--root` 传入，也可以在界面「设置」里保存到配置文件 `%USERPROFILE%\.photoflow.json`。
 
 跑测试：
 
 ```bash
-python python/test/test_photoflow.py
+cargo test                 # 47 个用例：29 单元 + 18 集成
 ```
 
-测试全部在临时目录里造数据，不碰真实照片。
-
-### Rust 版
-
-零第三方依赖，`cargo test` 47 个用例（29 单元 + 18 集成）；桌面界面用 Tauri 2（系统 WebView2）。构建方式、与 Python 版的差异、验证情况见 `rust/README.md`。
+测试全部在临时目录里造数据，不碰真实照片。模块划分、几个必须守住的坑、以及验证到什么程度，见 `README/开发说明.md`。
 
 ## 九、已知限制
 

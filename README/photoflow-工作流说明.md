@@ -1,7 +1,7 @@
 # 照片库工作流说明
 
 照片库根目录：`J:\sata11-17665442547\05_相册\my摄影照片-合集`
-脚本目录：`E:\fengkai\my_project\photoflow\python`
+程序目录：`E:\fengkai\my_project\photoflow`（命令行是 `target\release\photoflow.exe`，界面是 `photoflow-gui.exe`）
 
 ---
 
@@ -142,11 +142,12 @@ photoflow doctor
 ## 六、命令速查
 
 ```
-photoflow gui                           打开图形界面（双击 photoflow.bat 也行）
 photoflow new <批次>                     建 04/05/03/99 四个目录
-photoflow ingest <源目录> <批次>          按扩展名分发 RAW/JPG
+photoflow ingest <源目录> <批次>          按扩展名分发 RAW / 原图 / 视频
 photoflow archive <批次>                 已修照片的原图 05 -> 99
 photoflow doctor                         全库体检（只读）
+
+桌面界面：运行 photoflow-gui.exe（不带参数就是开界面）
 
 通用参数：
   --apply      确认清单后真正执行（不加只预演）
